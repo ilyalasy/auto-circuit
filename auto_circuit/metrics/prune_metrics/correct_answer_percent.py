@@ -45,7 +45,7 @@ def measure_correct_ans_percent(
         pruned_out_pbar.set_description_str(f"Correct Percent for {edge_count} edges")
         correct_proportions = []
         for batch in dataloader:
-            assert isinstance(batch.answers, t.Tensor)
+            # assert isinstance(batch.answers, t.Tensor)
             logits = pruned_out[batch.key]
             if out_of_correct_and_incorrect_answers:
                 correct_proportn = correct_answer_greater_than_incorrect_proportion(

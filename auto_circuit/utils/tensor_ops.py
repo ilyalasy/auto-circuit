@@ -1,7 +1,6 @@
 import math
 
 import torch as t
-
 from auto_circuit.data import PromptPairBatch
 from auto_circuit.types import PruneScores
 
@@ -98,7 +97,7 @@ def batch_answer_diffs(vals: t.Tensor, batch: PromptPairBatch) -> t.Tensor:
         return ans_avgs - wrong_avgs
     else:
         # If each prompt has a different number of answers we have a list of tensors
-        assert isinstance(answers, list) and isinstance(wrong_answers, list)
+        # assert isinstance(answers, list) and isinstance(wrong_answers, list)
         ans_avgs = [vocab_avg_val(v, a) for v, a in zip(vals, answers)]
         wrong_avgs = [vocab_avg_val(v, w) for v, w in zip(vals, wrong_answers)]
         return t.stack(ans_avgs) - t.stack(wrong_avgs)
@@ -154,6 +153,8 @@ def correct_answer_proportion(logits: t.Tensor, batch: PromptPairBatch) -> t.Ten
         assert isinstance(answers, list)
         corrects = []
         for prompt_idx, prompt_answer in enumerate(answers):
+            if prompt_answer.size(0) > 1:
+                prompt_answer = prompt_answer[:1]  # take first token
             assert prompt_answer.shape == (1,)
             corrects.append((t.argmax(logits[prompt_idx], dim=-1) == prompt_answer))
         return t.stack(corrects).float().mean()

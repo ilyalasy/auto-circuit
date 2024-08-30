@@ -6,11 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch as t
 import torch.utils.data
 from attr import dataclass
-from torch.utils.data import (
-    DataLoader,
-    Dataset,
-    Subset,
-)
+from torch.utils.data import DataLoader, Dataset, Subset
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCache
 
 BatchKey = int
@@ -348,8 +344,8 @@ def load_datasets_from_json(
         ]
         clean_prompts = clean_prompts["input_ids"].to(device)
         corrupt_prompts = corrupt_prompts["input_ids"].to(device)
-        answers = [a["input_ids"].squeeze(-1).to(device) for a in ans_dicts]
-        wrong_answers = [a["input_ids"].squeeze(-1).to(device) for a in wrong_ans_dicts]
+        answers = [a["input_ids"].squeeze(0).to(device) for a in ans_dicts]
+        wrong_answers = [a["input_ids"].squeeze(0).to(device) for a in wrong_ans_dicts]
 
         if tail_divergence:
             diverge_idxs = (~(clean_prompts == corrupt_prompts)).int().argmax(dim=1)

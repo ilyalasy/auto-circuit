@@ -1,4 +1,4 @@
-#%%
+# %%
 import math
 from collections import defaultdict
 from contextlib import contextmanager
@@ -40,6 +40,7 @@ def patchable_model(
     separate_qkv: Optional[bool] = None,
     kv_caches: Tuple[Optional[HookedTransformerKeyValueCache], ...] = (None,),
     device: t.device = t.device("cpu"),
+    ignore_tokens: Optional[Set[int]] = None,
 ) -> PatchableModel:
     """
     Wrap a model and inject [`PatchWrapper`][auto_circuit.types.PatchWrapper]s into the
@@ -98,6 +99,7 @@ def patchable_model(
         separate_qkv=separate_qkv,
         kv_caches=kv_caches,
         wrapped_model=model,
+        ignore_tokens=ignore_tokens,
     )
 
 

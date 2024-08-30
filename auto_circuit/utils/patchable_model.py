@@ -76,6 +76,7 @@ class PatchableModel(t.nn.Module):
     separate_qkv: Optional[bool]
     kv_caches: Optional[Dict[int, HookedTransformerKeyValueCache]]
     wrapped_model: t.nn.Module
+    ignore_tokens: Optional[Set[int]]
 
     def __init__(
         self,
@@ -95,6 +96,7 @@ class PatchableModel(t.nn.Module):
         separate_qkv: Optional[bool],
         kv_caches: Tuple[Optional[HookedTransformerKeyValueCache], ...],
         wrapped_model: t.nn.Module,
+        ignore_tokens: Optional[Set[int]] = None,
     ) -> None:
         super().__init__()
         self.nodes = nodes
@@ -129,6 +131,7 @@ class PatchableModel(t.nn.Module):
                     batch_size = kv_cache.previous_attention_mask.shape[0]
                     self.kv_caches[batch_size] = kv_cache
         self.wrapped_model = wrapped_model
+        self.ignore_tokens = ignore_tokens
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """
@@ -136,11 +139,14 @@ class PatchableModel(t.nn.Module):
         `None`, the KV cache is passed to the wrapped model as a keyword argument.
         """
         if self.kv_caches is None or "past_kv_cache" in kwargs:
-            return self.wrapped_model(*args, **kwargs)
+            logits = self.wrapped_model(*args, **kwargs)
         else:
             batch_size = args[0].shape[0]
             kv = self.kv_caches[batch_size]
-            return self.wrapped_model(*args, past_kv_cache=kv, **kwargs)
+            logits = self.wrapped_model(*args, past_kv_cache=kv, **kwargs)
+        if self.ignore_tokens is not None:
+            logits[..., self.ignore_tokens] = -float("inf")
+        return logits
 
     def run_with_cache(self, *args: Any, **kwargs: Any) -> Any:
         """
@@ -180,7 +186,7 @@ class PatchableModel(t.nn.Module):
             A new [`PruneScores`][auto_circuit.types.PruneScores] instance.
         """
         prune_scores: PruneScores = {}
-        for (mod_name, mask) in self.patch_masks.items():
+        for mod_name, mask in self.patch_masks.items():
             prune_scores[mod_name] = t.full_like(mask.data, init_val)
         return prune_scores
 

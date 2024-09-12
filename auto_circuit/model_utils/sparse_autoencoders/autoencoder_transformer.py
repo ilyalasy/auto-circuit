@@ -2,19 +2,19 @@
 A transformer model that patches in sparse autoencoder reconstructions at each layer.
 Work in progress. Error nodes not implemented.
 """
-from copy import deepcopy
+
+import time
 from itertools import count
 from typing import Any, List, Optional, Set
 
 import torch as t
-from transformer_lens import HookedTransformer
+from sae_lens import SAE, HookedSAETransformer
 
 from auto_circuit.data import PromptDataLoader
 from auto_circuit.model_utils.sparse_autoencoders.sparse_autoencoder import (
     SparseAutoencoder,
-    load_autoencoder,
 )
-from auto_circuit.types import AutoencoderInput, DestNode, SrcNode
+from auto_circuit.types import DestNode, SrcNode
 from auto_circuit.utils.custom_tqdm import tqdm
 from auto_circuit.utils.patchable_model import PatchableModel
 
@@ -33,7 +33,15 @@ class AutoencoderTransformer(t.nn.Module):
             self.wrapped_model = wrapped_model
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model(*args, **kwargs)
+        with t.profiler.profile(
+            profile_memory=True,
+            record_shapes=True,
+            with_stack=True,
+            on_trace_ready=t.profiler.tensorboard_trace_handler(
+                f"profiler/run-simple-{time.time_ns()}"
+            ),
+        ) as prof:
+            return self.wrapped_model(*args, **kwargs)
 
     def reset_activated_latents(
         self, batch_len: Optional[int] = None, seq_len: Optional[int] = None
@@ -110,6 +118,9 @@ class AutoencoderTransformer(t.nn.Module):
     def run_with_cache(self, *args: Any, **kwargs: Any) -> Any:
         return self.wrapped_model.run_with_cache(*args, **kwargs)
 
+    def run_with_hooks(self, *args: Any, **kwargs: Any) -> Any:
+        return self.wrapped_model.run_with_hooks(*args, **kwargs)
+
     def add_hook(self, *args: Any, **kwargs: Any) -> Any:
         return self.wrapped_model.add_hook(*args, **kwargs)
 
@@ -149,44 +160,45 @@ class AutoencoderTransformer(t.nn.Module):
 
 
 def sae_model(
-    model: HookedTransformer,
-    sae_input: AutoencoderInput,
-    load_pretrained: bool,
-    n_latents: Optional[int] = None,
-    pythia_size: Optional[str] = None,
-    new_instance: bool = True,
-) -> AutoencoderTransformer:
+    model_name: str,
+    sae_release_name: str,
+    sae_id_template: str,
+    device: str,
+) -> HookedSAETransformer:
     """
     Inject
     [`SparseAutoencoder`][auto_circuit.model_utils.sparse_autoencoders.sparse_autoencoder.SparseAutoencoder]
     wrappers into a transformer model.
     """
-    if new_instance:
-        model = deepcopy(model)
-    sparse_autoencoders: List[SparseAutoencoder] = []
+
+    model: HookedSAETransformer = HookedSAETransformer.from_pretrained(
+        model_name,
+        device=device,
+        fold_ln=True,
+        center_writing_weights=True,
+        center_unembed=True,
+    )  # type: ignore
+    model.cfg.use_attn_result = True
+    model.cfg.use_attn_in = True
+    model.cfg.use_split_qkv_input = True
+    model.cfg.use_hook_mlp_in = True
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+
     for layer_idx in range(model.cfg.n_layers):
-        if sae_input == "mlp_post_act":
-            hook_point = model.blocks[layer_idx].mlp.hook_post
-            hook_module = model.blocks[layer_idx].mlp
-            hook_name = "hook_post"
-        else:
-            assert sae_input == "resid_delta_mlp"
-            hook_point = model.blocks[layer_idx].hook_mlp_out
-            hook_module = model.blocks[layer_idx]
-            hook_name = "hook_mlp_out"
-        if load_pretrained:
-            assert pythia_size is not None
-            sae = load_autoencoder(hook_point, model, layer_idx, sae_input, pythia_size)
-        else:
-            assert n_latents is not None
-            sae = SparseAutoencoder(hook_point, n_latents, model.cfg.d_model)
-        sae.to(model.cfg.device)
-        setattr(hook_module, hook_name, sae)
-        sparse_autoencoders.append(sae)
-    return AutoencoderTransformer(model, sparse_autoencoders)
+        sae, cfg_dict, log_sparsities = SAE.from_pretrained(
+            sae_release_name,
+            sae_id_template.format(layer_idx),
+            device=device,
+        )
+
+        model.add_sae(sae)
+
+    return model
 
 
-def factorized_src_nodes(model: AutoencoderTransformer) -> Set[SrcNode]:
+def factorized_src_nodes(model: HookedSAETransformer) -> Set[SrcNode]:
     """Get the source part of each edge in the factorized graph, grouped by layer.
     Graph is factorized following the Mathematical Framework paper."""
     assert model.cfg.use_attn_result  # Get attention head outputs separately
@@ -208,6 +220,7 @@ def factorized_src_nodes(model: AutoencoderTransformer) -> Set[SrcNode]:
         )
     )
 
+    sae_blocks = list(model.acts_to_saes.values())
     for block_idx in range(model.cfg.n_layers):
         layer = next(layers)
         for head_idx in range(model.cfg.n_heads):
@@ -224,16 +237,17 @@ def factorized_src_nodes(model: AutoencoderTransformer) -> Set[SrcNode]:
                 )
             )
         layer = layer if model.cfg.parallel_attn_mlp else next(layers)
-        for latent_idx in range(model.blocks[block_idx].hook_mlp_out.n_latents):
+        n_latents = sae_blocks[block_idx].cfg.d_sae
+        for latent_idx in range(n_latents):
             nodes.add(
                 SrcNode(
                     name=f"MLP {block_idx} Latent {latent_idx}",
-                    module_name=f"blocks.{block_idx}.hook_mlp_out.latent_outs",
+                    module_name=f"{sae_blocks[block_idx].name}.hook_sae_recons",
                     layer=layer,
                     src_idx=next(idxs),
                     head_dim=2,
                     head_idx=latent_idx,
-                    weight=f"blocks.{block_idx}.hook_mlp_out.decoder.weight",
+                    weight=f"blocks.{block_idx}.hook_mlp_out.W_dec",
                     weight_head_dim=0,
                 )
             )

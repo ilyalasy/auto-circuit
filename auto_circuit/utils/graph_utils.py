@@ -6,6 +6,7 @@ from itertools import chain, product
 from typing import Collection, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch as t
+from sae_lens import HookedSAETransformer
 from transformer_lens import HookedTransformer, HookedTransformerKeyValueCache
 
 import auto_circuit.model_utils.micro_model_utils as mm_utils
@@ -67,7 +68,7 @@ def patchable_model(
     Warning:
         This function modifies the model, it does not return a new model.
     """
-    assert not isinstance(model, PatchableModel), "Model is already patchable"
+    assert not isinstance(model, PatchableModel), "Modx el is already patchable"
     nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len = graph_edges(
         model, factorized, separate_qkv, seq_len
     )
@@ -161,14 +162,14 @@ def graph_edges(
         if isinstance(model, MicroModel):
             srcs: Set[SrcNode] = mm_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = mm_utils.factorized_dest_nodes(model)
+        elif isinstance(model, HookedSAETransformer):
+            assert separate_qkv is not None, "separate_qkv must be specified for LLM"
+            srcs: Set[SrcNode] = sae_utils.factorized_src_nodes(model)
+            dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
         elif isinstance(model, HookedTransformer):
             assert separate_qkv is not None, "separate_qkv must be specified for LLM"
             srcs: Set[SrcNode] = tl_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = tl_utils.factorized_dest_nodes(model, separate_qkv)
-        elif isinstance(model, AutoencoderTransformer):
-            assert separate_qkv is not None, "separate_qkv must be specified for LLM"
-            srcs: Set[SrcNode] = sae_utils.factorized_src_nodes(model)
-            dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
         else:
             raise NotImplementedError(model)
         for i in [None] if seq_len is None else range(seq_len):
@@ -361,6 +362,10 @@ def train_mask_mode(
     model.eval()
     model.zero_grad()
     parameters: Dict[str, t.nn.Parameter] = {}
+
+    for param in model.parameters():
+        param.detach_().requires_grad_(False)
+
     for wrapper in model.dest_wrappers:
         patch_mask = wrapper.patch_mask
         patch_mask.detach_().requires_grad_(requires_grad)

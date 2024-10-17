@@ -1,9 +1,11 @@
-#%%
+# %%
 
+import pytest
 import torch as t
 
 from auto_circuit.data import PromptPairBatch
 from auto_circuit.utils.tensor_ops import (
+    assign_sparse_tensor,
     batch_answer_diff_percents,
     batch_avg_answer_diff,
     batch_avg_answer_val,
@@ -161,6 +163,134 @@ def test_batch_answer_diff_percent():
     true_target_logit_diffs = target_vals[:, 0] - target_vals[:, 1]
     true_logit_diff_percents = (true_pred_logit_diffs / true_target_logit_diffs) * 100
     assert t.allclose(logit_diff_percents, true_logit_diff_percents)
+
+
+def test_assign_sparse_tensor():
+    # Test case 1: Assigning values to existing indices
+    dense_tensor = t.tensor(
+        [
+            [
+                [1, 2, 3],
+                [0, 0, 0],
+                [0, 5.1, 6.5],
+                [0, 0, 0],
+            ],
+            [
+                [0, 0, 0],
+                [0, 2, 0],
+                [0, 0, 0],
+                [0, 2.2, 0],
+            ],
+        ]
+    )
+    sparse_tensor = dense_tensor.to_sparse()
+    result = assign_sparse_tensor(
+        sparse_tensor,
+        slice(0, 1, None),
+        t.tensor(
+            [
+                [1, 2, 3],
+                [4, 5, 6],
+                [0, 5.1, 6.5],
+                [0, 0, 0],
+            ],
+        ),
+    )
+    dense_res = t.tensor(
+        [
+            [
+                [1, 2, 3],
+                [4, 5, 6],
+                [0, 5.1, 6.5],
+                [0, 0, 0],
+            ],
+            [
+                [0, 0, 0],
+                [0, 2, 0],
+                [0, 0, 0],
+                [0, 2.2, 0],
+            ],
+        ]
+    )
+    assert t.allclose(result.to_dense(), dense_res)
+
+    # Test case 1.5: Assigning values to existing indices
+    dense_tensor = t.tensor(
+        [
+            [1, 2, 3],
+            [0, 0, 0],
+            [0, 5.1, 6.5],
+            [0, 0, 0],
+            [4, 5, 6],
+            [0, 2, 0],
+            [0, 0, 0],
+            [0, 2.2, 0],
+        ],
+    )
+    sparse_tensor = dense_tensor.to_sparse()
+    result = assign_sparse_tensor(
+        sparse_tensor,
+        slice(2, 6, None),
+        t.tensor(
+            [
+                [1, 2, 3],
+                [4, 5, 6],
+                [0, 5.1, 6.5],
+                [0, 0, 0],
+            ],
+        ),
+    )
+    dense_res = t.tensor(
+        [
+            [1, 2, 3],
+            [0, 0, 0],
+            [1, 2, 3],
+            [4, 5, 6],
+            [0, 5.1, 6.5],
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 2.2, 0],
+        ],
+    )
+    assert t.allclose(result.to_dense(), dense_res)
+
+    # Test case 2: Assigning values to new indices
+    sparse_tensor = t.sparse_coo_tensor(
+        indices=t.tensor([[0, 2]]), values=t.tensor([1, 3]), size=(4,)
+    )
+    result = assign_sparse_tensor(sparse_tensor, t.tensor([1]), t.tensor([2]))
+    result = assign_sparse_tensor(result, t.tensor([3]), t.tensor([4]))
+    assert t.allclose(result.to_dense(), t.tensor([1, 2, 3, 4]))
+
+    # Test case 3: Using slice for indices
+    sparse_tensor = t.sparse_coo_tensor(
+        indices=t.tensor([[0, 1, 2, 3]]), values=t.tensor([1, 2, 3, 4]), size=(5,)
+    )
+    result = assign_sparse_tensor(sparse_tensor, slice(1, 3), t.tensor([5, 6]))
+    assert t.allclose(result.to_dense(), t.tensor([1, 5, 6, 4, 0]))
+
+    # Test case 4: Assigning to empty sparse tensor
+    tensor = t.tensor([[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]])
+    sparse_tensor = tensor.to_sparse()
+    result = assign_sparse_tensor(sparse_tensor, t.tensor([2]), t.tensor([1, 2, 3]))
+    assert t.allclose(
+        result.to_dense(), t.tensor([[0, 0, 0], [0, 0, 0], [1, 2, 3], [0, 0, 0]])
+    )
+
+    # Test case 5: Assigning to 2D sparse tensor
+    sparse_tensor = t.sparse_coo_tensor(
+        indices=t.tensor([[0, 1], [1, 0]]), values=t.tensor([1, 2]), size=(4, 2)
+    )
+    result = assign_sparse_tensor(sparse_tensor, t.tensor([1, 2]), t.tensor([3, 4]))
+    assert t.allclose(result.to_dense(), t.tensor([[0, 1], [3, 4], [3, 4], [0, 0]]))
+
+    # Test case 6: Assertion error
+    sparse_tensor = t.sparse_coo_tensor(
+        indices=t.tensor([[0, 1], [1, 0]]), values=t.tensor([1, 2]), size=(4, 4)
+    )
+
+    with pytest.raises(AssertionError):
+        assign_sparse_tensor(sparse_tensor, t.tensor([1, 2]), t.tensor([3, 4]))
 
 
 # test_batch_avg_answer_val()

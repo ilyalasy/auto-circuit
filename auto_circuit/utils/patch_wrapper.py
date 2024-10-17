@@ -1,10 +1,13 @@
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Optional, Tuple
 
 import torch as t
 from einops import einsum
 
 from auto_circuit.types import MaskFn, PatchWrapper
-from auto_circuit.utils.tensor_ops import sample_hard_concrete
+from auto_circuit.utils.tensor_ops import assign_sparse_tensor, sample_hard_concrete
+
+TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
 
 
 class PatchWrapperImpl(PatchWrapper):
@@ -123,29 +126,39 @@ class PatchWrapperImpl(PatchWrapper):
         self.batch_size = batch_size
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
+
         arg_0: t.Tensor = args[0].clone()
 
         if self.patch_mode and self.is_dest:
             assert self.patch_src_outs is not None and self.curr_src_outs is not None
-            d = self.patch_src_outs[self.in_srcs] - self.curr_src_outs[self.in_srcs]
-            batch_str = ""
-            head_str = "" if self.head_dim is None else "dest"  # Patch heads separately
-            seq_str = "" if self.seq_dim is None else "seq"  # Patch tokens separately
             if self.mask_fn == "hard_concrete":
                 mask = sample_hard_concrete(
                     self.patch_mask, arg_0.size(0), self.batch_size is not None
                 )
-                batch_str = "batch"  # Sample distribution for each batch element
             elif self.mask_fn == "sigmoid":
                 mask = t.sigmoid(self.patch_mask)
             else:
                 assert self.mask_fn is None
-                batch_str = "batch" if self.batch_size is not None else ""
                 mask = self.patch_mask
             mask = self.dropout_layer(mask)
-            ein_pre = f"{batch_str} {seq_str} {head_str} src, src batch {self.dims} ..."
-            ein_post = f"batch {self.dims} {head_str} ..."
-            arg_0 += einsum(mask, d, f"{ein_pre} -> {ein_post}")  # Add mask times diff
+
+            ein_pre_A, ein_pre_B, ein_post = self._get_ein_strs()
+
+            # d = self.patch_src_outs[self.in_srcs] - self.curr_src_outs[self.in_srcs]
+            # arg_0 += einsum(
+            #     mask, d, f"{ein_pre_A}, {ein_pre_B} -> {ein_post}"
+            # )  # Add mask times diff
+
+            arg_0 = PatchFunction.apply(
+                arg_0,
+                mask,
+                self.patch_src_outs,
+                self.curr_src_outs,
+                self.in_srcs,
+                ein_pre_A,
+                ein_pre_B,
+                ein_post,
+            )  # type: ignore
 
         new_args = (arg_0,) + args[1:]
         out = self.module(*new_args, **kwargs)
@@ -157,14 +170,157 @@ class PatchWrapperImpl(PatchWrapper):
             else:
                 squeeze_dim = self.head_dim if self.head_dim < 0 else self.head_dim + 1
                 src_out = t.stack(out.split(1, dim=self.head_dim)).squeeze(squeeze_dim)
-            self.curr_src_outs[self.src_idxs] = src_out
+            if self.curr_src_outs.is_sparse:
+                self.curr_src_outs = assign_sparse_tensor(
+                    self.curr_src_outs, self.src_idxs, src_out
+                )
+            else:
+                self.curr_src_outs[self.src_idxs] = src_out
 
         return out
 
+    def _get_ein_strs(self):
+        if self.mask_fn == "hard_concrete":
+            batch_str = "batch"  # Sample distribution for each batch element
+        elif self.mask_fn == "sigmoid":
+            batch_str = ""
+        else:
+            batch_str = "batch" if self.batch_size is not None else ""
+
+        head_str = "" if self.head_dim is None else "dest"  # Patch heads separately
+        seq_str = "" if self.seq_dim is None else "seq"  # Patch tokens separately
+        ein_pre_A = f"{batch_str} {seq_str} {head_str} src"
+        ein_pre_B = f"src batch {self.dims} ..."
+        ein_post = f"batch {self.dims} {head_str} ..."
+        return ein_pre_A, ein_pre_B, ein_post
+
     def __repr__(self):
-        module_str = self.module.name if hasattr(self.module, "name") else self.module
+        module_str = (
+            self.module.name if hasattr(self.module, "name") else self.module_name
+        )
         repr = [f"PatchWrapper({module_str})"]
         repr.append(("Src✓" if self.is_src else "") + ("Dest✓" if self.is_dest else ""))
         repr.append(f"Patch Mask: [{self.patch_mask.shape}]") if self.is_dest else None
-        repr.append(str(self.patch_mask.data)) if self.is_dest else None
+        # repr.append(str(self.patch_mask.data)) if self.is_dest else None
         return "\n".join(repr)
+
+    def trace_handler(self, prof: t.profiler.profile):
+        # Prefix for file names.
+        module_str = self.module.name if hasattr(self.module, "name") else self.module
+        timestamp = datetime.now().strftime(TIME_FORMAT_STR)
+        file_prefix = f"{module_str}_{timestamp}"
+
+        # Construct the trace file.
+        prof.export_chrome_trace(f"profiler/{file_prefix}.json")
+
+        # Construct the memory timeline file.
+        prof.export_memory_timeline(f"profiler/{file_prefix}.html")  # device="mps"
+
+
+def _calculate_diff(patch_src_outs: t.Tensor, curr_src_outs: t.Tensor, in_srcs: slice):
+    if patch_src_outs.is_sparse and curr_src_outs.is_sparse:
+        in_srcs_tensor = t.arange(
+            in_srcs.start or 0,
+            in_srcs.stop or patch_src_outs.shape[0],
+            in_srcs.step or 1,
+            device=patch_src_outs.device,
+        )
+        return (
+            patch_src_outs.index_select(0, in_srcs_tensor)
+            - curr_src_outs.index_select(0, in_srcs_tensor)
+        ).to_dense()
+    else:
+        return patch_src_outs[in_srcs] - curr_src_outs[in_srcs]
+
+
+class PatchFunction(t.autograd.Function):
+
+    @staticmethod
+    def forward(
+        x: t.Tensor,
+        mask: t.Tensor,
+        patch_src_outs: t.Tensor,
+        curr_src_outs: t.Tensor,
+        in_srcs: slice,
+        ein_pre_A: str,
+        ein_pre_B: str,
+        ein_post: str,
+    ):
+        d = _calculate_diff(patch_src_outs, curr_src_outs, in_srcs)
+        return x + einsum(mask, d, f"{ein_pre_A}, {ein_pre_B} -> {ein_post}")
+
+    @staticmethod
+    def setup_context(
+        ctx: t.autograd.function.FunctionCtx,
+        inputs: Tuple[t.Tensor, t.Tensor, t.Tensor, t.Tensor, slice, str, str, str],
+        output: t.Tensor,
+    ):
+        (
+            x,
+            mask,
+            patch_src_outs,
+            curr_src_outs,
+            in_srcs,
+            ein_pre_A,
+            ein_pre_B,
+            ein_post,
+        ) = inputs
+        ctx.in_srcs = in_srcs
+        ctx.ein_pre_A = ein_pre_A
+        ctx.ein_pre_B = ein_pre_B
+        ctx.ein_post = ein_post
+        ctx.save_for_backward(patch_src_outs, curr_src_outs)
+
+    @staticmethod
+    @t.autograd.function.once_differentiable
+    def backward(ctx: t.autograd.function.FunctionCtx, grad_output: t.Tensor):
+        patch_src_outs, curr_src_outs = ctx.saved_tensors
+        d = _calculate_diff(patch_src_outs, curr_src_outs, ctx.in_srcs)
+
+        grad_x = grad_output
+        grad_mask = einsum(
+            grad_output, d, f"{ctx.ein_post}, {ctx.ein_pre_B} -> {ctx.ein_pre_A}"
+        )
+
+        # del ctx.patch_src_outs, ctx.curr_src_outs
+        return grad_x, grad_mask, None, None, None, None, None, None
+
+
+import torch as t
+from torch.autograd import gradcheck
+
+
+def test_patch_function():
+    # Set up input tensors
+    batch, dest, src, d1 = 3, 4, 2, 5
+    x = t.randn(batch, d1, dest, requires_grad=True, dtype=t.float64)
+    mask = t.randn(batch, dest, src, requires_grad=True, dtype=t.double)
+    patch_src_outs = t.randn(src, batch, d1, dtype=t.float64)
+    curr_src_outs = t.randn(src, batch, d1, dtype=t.float64)
+    in_srcs = slice(0, src)
+    ein_pre_A = "batch dest src"
+    ein_pre_B = "src batch d1 ..."
+    ein_post = "batch d1 dest ..."
+
+    # Run gradcheck
+    assert gradcheck(
+        PatchFunction.apply,
+        (
+            x,
+            mask,
+            patch_src_outs,
+            curr_src_outs,
+            in_srcs,
+            ein_pre_A,
+            ein_pre_B,
+            ein_post,
+        ),  # type: ignore
+        eps=1e-6,
+        atol=1e-4,
+    )
+
+    print("PatchFunction gradcheck passed!")
+
+
+if __name__ == "__main__":
+    test_patch_function()

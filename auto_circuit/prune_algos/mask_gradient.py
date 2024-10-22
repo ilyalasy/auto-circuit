@@ -1,17 +1,13 @@
-from typing import Dict, Literal, Optional, Set
+from typing import Literal, Optional, Set
 
 import torch as t
 from torch.nn.functional import log_softmax
 
 from auto_circuit.data import PromptDataLoader
-from auto_circuit.types import AblationType, BatchKey, Edge, PruneScores
-from auto_circuit.utils.ablation_activations import batch_src_ablations
+from auto_circuit.types import AblationType, Edge, PruneScores
+from auto_circuit.utils.ablation_activations import src_ablations
 from auto_circuit.utils.custom_tqdm import tqdm
-from auto_circuit.utils.graph_utils import (
-    patch_mode,
-    set_all_masks,
-    train_mask_mode,
-)
+from auto_circuit.utils.graph_utils import patch_mode, set_all_masks, train_mask_mode
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import batch_avg_answer_diff, batch_avg_answer_val
 
@@ -63,12 +59,15 @@ def mask_gradient_prune_scores(
     model = model
     out_slice = model.out_slice
 
-    src_outs: Dict[BatchKey, t.Tensor] = batch_src_ablations(
-        model,
-        dataloader,
-        ablation_type=ablation_type,
-        clean_corrupt=clean_corrupt,
-    )
+    # src_outs: Dict[BatchKey, LazyAblations] = batch_src_ablations(
+    #     model,
+    #     dataloader,
+    #     ablation_type=ablation_type,
+    #     clean_corrupt=clean_corrupt,
+    # )
+    patch_src_outs = None
+    if ablation_type.mean_over_dataset:
+        patch_src_outs = src_ablations(model, dataloader, ablation_type)
 
     with train_mask_mode(model):
         for sample in (ig_pbar := tqdm(range((integrated_grad_samples or 0) + 1))):
@@ -81,7 +80,15 @@ def mask_gradient_prune_scores(
                 set_all_masks(model, val=mask_val)
 
             for batch in dataloader:
-                patch_src_outs = src_outs[batch.key].clone().detach()
+                if patch_src_outs is None:
+                    if ablation_type == AblationType.ZERO:
+                        input_batch = batch.clean
+                    else:
+                        input_batch = (
+                            batch.clean if clean_corrupt == "clean" else batch.corrupt
+                        )
+                    patch_src_outs = src_ablations(model, input_batch, ablation_type)
+                    patch_src_outs = patch_src_outs.to_sparse()
                 with patch_mode(model, patch_src_outs):
                     logits = model(batch.clean)[out_slice]
                     if grad_function == "logit":
@@ -107,6 +114,8 @@ def mask_gradient_prune_scores(
                         raise ValueError(f"Unknown answer_function: {answer_function}")
 
                     loss.backward()
+                if not ablation_type.mean_over_dataset:
+                    patch_src_outs = None
 
     prune_scores: PruneScores = {}
     for dest_wrapper in model.dest_wrappers:

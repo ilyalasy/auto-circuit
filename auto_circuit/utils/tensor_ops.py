@@ -273,18 +273,91 @@ def prune_scores_threshold(
         return desc_prune_scores(prune_scores)[edge_count - 1]
 
 
+# def assign_sparse_tensor_old(
+#     sparse_tensor: t.Tensor, indices: t.Tensor | slice, values: t.Tensor
+# ) -> t.Tensor:
+#     """
+#     Assign values to specific indices in a sparse tensor.
+
+#     Args:
+#         sparse_tensor: The sparse tensor to assign values to.
+#         indices: The indices to assign values to.
+#         values: The values to assign.
+#     """
+
+#     assert sparse_tensor.is_sparse, "Input tensor must be sparse"
+#     sparse_tensor = sparse_tensor.coalesce()
+#     # Convert slice to tensor if necessary
+#     if isinstance(indices, slice):
+#         indices = t.arange(
+#             indices.start or 0,
+#             indices.stop or sparse_tensor.shape[0],
+#             indices.step or 1,
+#         )
+#     # Assert that values size is the same as sparse_tensor[indices]
+#     # Calculate expected size of values
+#     expected_sizes = [
+#         t.Size([indices.size(0)] + list(sparse_tensor.size()[1:])),
+#         sparse_tensor.size()[1:] or t.Size([1]),
+#     ]
+#     # Check if values size matches expected size
+#     assert (
+#         values.size() in expected_sizes
+#     ), f"Values Tensor is expected to be of these sizes: {expected_sizes}"
+
+#     # Assert that indices has only one dimension
+#     assert (
+#         indices.ndim == 1
+#     ), f"Indices tensor must be 1-dimensional, but got {indices.ndim} dimensions"
+
+#     dim_diff = sparse_tensor.ndim - values.ndim
+#     if dim_diff > 0:
+#         values = values.repeat(indices.size(0), *([1] * values.ndim))
+
+#     new_indices = (
+#         t.cartesian_prod(*[t.arange(dim) for dim in values.shape])
+#         .reshape(-1, values.ndim)
+#         .mT
+#     )
+#     new_indices[0] = indices.repeat_interleave(new_indices.size(-1) // indices.size(0))
+#     new_values = values.flatten()
+
+#     # Get existing indices and values
+#     existing_indices = sparse_tensor.indices()
+#     existing_values = sparse_tensor.values()
+
+#     # Create a mask for existing indices that need to be updated
+#     idx_intersection = (existing_indices.unsqueeze(2) == new_indices.unsqueeze(1)).all(
+#         dim=0
+#     )
+#     exist_mask = idx_intersection.any(dim=1)
+#     new_mask = idx_intersection.any(dim=0)
+
+#     # Update existing values
+#     existing_values[exist_mask] = new_values[new_mask]
+
+#     # Append new indices and values
+#     remaining_new_indices = new_indices[:, ~new_mask]
+#     remaining_new_values = new_values[~new_mask]
+
+#     final_indices = t.cat([existing_indices, remaining_new_indices], dim=1)
+#     final_values = t.cat([existing_values, remaining_new_values])
+
+#     return t.sparse_coo_tensor(
+#         final_indices,
+#         final_values,
+#         sparse_tensor.shape,
+#         dtype=sparse_tensor.dtype,
+#         device=sparse_tensor.device,
+#     ).coalesce()
+
+
 def assign_sparse_tensor(
     sparse_tensor: t.Tensor, indices: t.Tensor | slice, values: t.Tensor
 ) -> t.Tensor:
     """
     Assign values to specific indices in a sparse tensor.
-
-    Args:
-        sparse_tensor: The sparse tensor to assign values to.
-        indices: The indices to assign values to.
-        values: The values to assign.
     """
-
     assert sparse_tensor.is_sparse, "Input tensor must be sparse"
     sparse_tensor = sparse_tensor.coalesce()
     # Convert slice to tensor if necessary
@@ -310,43 +383,21 @@ def assign_sparse_tensor(
         indices.ndim == 1
     ), f"Indices tensor must be 1-dimensional, but got {indices.ndim} dimensions"
 
-    dim_diff = sparse_tensor.ndim - values.ndim
-    if dim_diff > 0:
-        values = values.repeat(indices.size(0), *([1] * values.ndim))
-
-    new_indices = (
-        t.cartesian_prod(*[t.arange(dim) for dim in values.shape])
-        .reshape(-1, values.ndim)
-        .mT
+    # Create a mask tensor with the same shape as sparse_tensor
+    mask = t.ones(
+        sparse_tensor.size(), dtype=sparse_tensor.dtype, device=sparse_tensor.device
     )
-    new_indices[0] = indices.repeat_interleave(new_indices.size(-1) // indices.size(0))
-    new_values = values.flatten()
+    mask[indices] = 0
 
-    # Get existing indices and values
-    existing_indices = sparse_tensor.indices()
-    existing_values = sparse_tensor.values()
-
-    # Create a mask for existing indices that need to be updated
-    idx_intersection = (existing_indices.unsqueeze(2) == new_indices.unsqueeze(1)).all(
-        dim=0
+    values = (
+        t.zeros_like(mask, dtype=values.dtype, device=values.device)
+        .index_put_((indices,), values)
+        .to_sparse()
     )
-    exist_mask = idx_intersection.any(dim=1)
-    new_mask = idx_intersection.any(dim=0)
 
-    # Update existing values
-    existing_values[exist_mask] = new_values[new_mask]
+    # Multiply the original sparse tensor by the mask (zeroing out the specified indices)
+    result = sparse_tensor * mask
+    # Add the new values at the specified indices
+    result += values
 
-    # Append new indices and values
-    remaining_new_indices = new_indices[:, ~new_mask]
-    remaining_new_values = new_values[~new_mask]
-
-    final_indices = t.cat([existing_indices, remaining_new_indices], dim=1)
-    final_values = t.cat([existing_values, remaining_new_values])
-
-    return t.sparse_coo_tensor(
-        final_indices,
-        final_values,
-        sparse_tensor.shape,
-        dtype=sparse_tensor.dtype,
-        device=sparse_tensor.device,
-    ).coalesce()
+    return result

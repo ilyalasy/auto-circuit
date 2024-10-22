@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Any, Collection, Dict, List, Optional, Set, Tuple
 
 import torch as t
+from transformer_lens import HookedTransformer
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCache
 
 from auto_circuit.types import DestNode, Edge, Node, PruneScores, SrcNode
@@ -75,7 +76,7 @@ class PatchableModel(t.nn.Module):
     is_transformer: bool
     separate_qkv: Optional[bool]
     kv_caches: Optional[Dict[int, HookedTransformerKeyValueCache]]
-    wrapped_model: t.nn.Module
+    wrapped_model: HookedTransformer
     ignore_tokens: Optional[Set[int]]
 
     def __init__(
@@ -160,6 +161,9 @@ class PatchableModel(t.nn.Module):
             batch_size = args[0].shape[0]
             kv = self.kv_caches[batch_size]
             return self.wrapped_model.run_with_cache(*args, past_kv_cache=kv, **kwargs)
+
+    def run_with_hooks(self, *args: Any, **kwargs: Any) -> Any:
+        return self.wrapped_model.run_with_hooks(*args, **kwargs)
 
     def input_to_embed(self, *args: Any, **kwargs: Any) -> Any:
         """

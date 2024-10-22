@@ -13,9 +13,6 @@ import auto_circuit.model_utils.micro_model_utils as mm_utils
 import auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer as sae_utils
 import auto_circuit.model_utils.transformer_lens_utils as tl_utils
 from auto_circuit.model_utils.micro_model_utils import MicroModel
-from auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer import (
-    AutoencoderTransformer,
-)
 from auto_circuit.types import (
     DestNode,
     Edge,
@@ -80,8 +77,8 @@ def patchable_model(
     else:
         last_slice = [-1] if slice_output == "last_seq" else [slice(1, None)]
         out_slice: Tuple[slice | int, ...] = tuple([slice(None)] * seq_dim + last_slice)
+    is_autoencoder_transformer = isinstance(model, HookedSAETransformer)
     is_tl_transformer = isinstance(model, HookedTransformer)
-    is_autoencoder_transformer = isinstance(model, AutoencoderTransformer)
     is_transformer = is_tl_transformer or is_autoencoder_transformer
     return PatchableModel(
         nodes=nodes,

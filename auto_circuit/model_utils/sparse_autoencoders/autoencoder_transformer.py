@@ -3,160 +3,152 @@ A transformer model that patches in sparse autoencoder reconstructions at each l
 Work in progress. Error nodes not implemented.
 """
 
-import time
 from itertools import count
-from typing import Any, List, Optional, Set
+from typing import Set
 
-import torch as t
-from sae_lens import SAE, HookedSAETransformer
+from sae_lens import HookedSAETransformer
 
-from auto_circuit.data import PromptDataLoader
-from auto_circuit.model_utils.sparse_autoencoders.sparse_autoencoder import (
-    SparseAutoencoder,
-)
+from auto_circuit.model_utils.sparse_autoencoders.sparse_autoencoder import SAEWrapper
 from auto_circuit.types import DestNode, SrcNode
-from auto_circuit.utils.custom_tqdm import tqdm
-from auto_circuit.utils.patchable_model import PatchableModel
 
+# class AutoencoderTransformer(t.nn.Module):
+#     wrapped_model: t.nn.Module
+#     sparse_autoencoders: List[SparseAutoencoder]
 
-class AutoencoderTransformer(t.nn.Module):
-    wrapped_model: t.nn.Module
-    sparse_autoencoders: List[SparseAutoencoder]
+#     def __init__(self, wrapped_model: t.nn.Module, saes: List[SparseAutoencoder]):
+#         super().__init__()
+#         self.sparse_autoencoders = saes
 
-    def __init__(self, wrapped_model: t.nn.Module, saes: List[SparseAutoencoder]):
-        super().__init__()
-        self.sparse_autoencoders = saes
+#         if isinstance(wrapped_model, PatchableModel):
+#             self.wrapped_model = wrapped_model.wrapped_model
+#         else:
+#             self.wrapped_model = wrapped_model
 
-        if isinstance(wrapped_model, PatchableModel):
-            self.wrapped_model = wrapped_model.wrapped_model
-        else:
-            self.wrapped_model = wrapped_model
+#     def forward(self, *args: Any, **kwargs: Any) -> Any:
+#         with t.profiler.profile(
+#             profile_memory=True,
+#             record_shapes=True,
+#             with_stack=True,
+#             on_trace_ready=t.profiler.tensorboard_trace_handler(
+#                 f"profiler/run-simple-{time.time_ns()}"
+#             ),
+#         ) as prof:
+#             return self.wrapped_model(*args, **kwargs)
 
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
-        with t.profiler.profile(
-            profile_memory=True,
-            record_shapes=True,
-            with_stack=True,
-            on_trace_ready=t.profiler.tensorboard_trace_handler(
-                f"profiler/run-simple-{time.time_ns()}"
-            ),
-        ) as prof:
-            return self.wrapped_model(*args, **kwargs)
+#     def reset_activated_latents(
+#         self, batch_len: Optional[int] = None, seq_len: Optional[int] = None
+#     ):
+#         for sae in self.sparse_autoencoders:
+#             sae.reset_activated_latents(batch_len=batch_len, seq_len=seq_len)
 
-    def reset_activated_latents(
-        self, batch_len: Optional[int] = None, seq_len: Optional[int] = None
-    ):
-        for sae in self.sparse_autoencoders:
-            sae.reset_activated_latents(batch_len=batch_len, seq_len=seq_len)
+#     def _prune_latents_with_dataset(
+#         self,
+#         dataloader: PromptDataLoader,
+#         max_latents: Optional[int],
+#         include_corrupt: bool = False,
+#         seq_len: Optional[int] = None,
+#     ):
+#         """
+#         !In place operation!
+#         Prune the weights of the autoencoder to remove latents that are never activated
+#         by the dataset. This can reduce the number of edges in the factorized model by a
+#         factor of 10 or more.
+#         """
+#         self.reset_activated_latents(seq_len=seq_len)
 
-    def _prune_latents_with_dataset(
-        self,
-        dataloader: PromptDataLoader,
-        max_latents: Optional[int],
-        include_corrupt: bool = False,
-        seq_len: Optional[int] = None,
-    ):
-        """
-        !In place operation!
-        Prune the weights of the autoencoder to remove latents that are never activated
-        by the dataset. This can reduce the number of edges in the factorized model by a
-        factor of 10 or more.
-        """
-        self.reset_activated_latents(seq_len=seq_len)
+#         print("Running dataset for autoencoder pruning...")
+#         unpruned_logits = []
+#         for batch_idx, batch in (batch_pbar := tqdm(enumerate(dataloader))):
+#             batch_pbar.set_description_str(f"Pruning Autoencoder: Batch {batch_idx}")
+#             for input_idx, prompt in (input_pbar := tqdm(enumerate(batch.clean))):
+#                 input_pbar.set_description_str(f"Clean Batch Input {input_idx}")
+#                 with t.inference_mode():
+#                     out = self.forward(prompt.unsqueeze(0))  # Run one at a time
+#                 unpruned_logits.append(out)
+#             if include_corrupt:
+#                 for input_idx, prompt in (input_pbar := tqdm(enumerate(batch.corrupt))):
+#                     input_pbar.set_description_str(f"Corrupt Batch Input {input_idx}")
+#                     with t.inference_mode():
+#                         out = self.forward(prompt.unsqueeze(0))
+#                     unpruned_logits.append(out)
 
-        print("Running dataset for autoencoder pruning...")
-        unpruned_logits = []
-        for batch_idx, batch in (batch_pbar := tqdm(enumerate(dataloader))):
-            batch_pbar.set_description_str(f"Pruning Autoencoder: Batch {batch_idx}")
-            for input_idx, prompt in (input_pbar := tqdm(enumerate(batch.clean))):
-                input_pbar.set_description_str(f"Clean Batch Input {input_idx}")
-                with t.inference_mode():
-                    out = self.forward(prompt.unsqueeze(0))  # Run one at a time
-                unpruned_logits.append(out)
-            if include_corrupt:
-                for input_idx, prompt in (input_pbar := tqdm(enumerate(batch.corrupt))):
-                    input_pbar.set_description_str(f"Corrupt Batch Input {input_idx}")
-                    with t.inference_mode():
-                        out = self.forward(prompt.unsqueeze(0))
-                    unpruned_logits.append(out)
+#         activated_latent_counts, latent_counts = [], []
+#         for sae in self.sparse_autoencoders:
+#             activated = (sae.latent_total_act > 0).sum(dim=-1).tolist()
+#             activated_latent_counts.append(activated)
+#             activated_count = activated if type(activated) == int else max(activated)
+#             max_latents = max_latents or activated_count
+#             latent_counts.append(max_idx := min(max_latents, activated_count))
+#             sorted_latents = t.sort(sae.latent_total_act, dim=-1, descending=True)
+#             idxs_to_keep = sorted_latents.indices[..., :max_idx]
+#             sae.prune_latents(idxs_to_keep)
 
-        activated_latent_counts, latent_counts = [], []
-        for sae in self.sparse_autoencoders:
-            activated = (sae.latent_total_act > 0).sum(dim=-1).tolist()
-            activated_latent_counts.append(activated)
-            activated_count = activated if type(activated) == int else max(activated)
-            max_latents = max_latents or activated_count
-            latent_counts.append(max_idx := min(max_latents, activated_count))
-            sorted_latents = t.sort(sae.latent_total_act, dim=-1, descending=True)
-            idxs_to_keep = sorted_latents.indices[..., :max_idx]
-            sae.prune_latents(idxs_to_keep)
+#         pruned_logits = []
+#         with t.inference_mode():
+#             for batch_idx, batch in (batch_pbar := tqdm(enumerate(dataloader))):
+#                 batch_pbar_str = f"Testing Pruned Autoencoder: Batch {batch_idx}"
+#                 batch_pbar.set_description_str(batch_pbar_str)
+#                 out = self.forward(batch.clean)
+#                 pruned_logits.append(out)
+#                 if include_corrupt:
+#                     out = self.forward(batch.corrupt)
+#                     pruned_logits.append(out)
 
-        pruned_logits = []
-        with t.inference_mode():
-            for batch_idx, batch in (batch_pbar := tqdm(enumerate(dataloader))):
-                batch_pbar_str = f"Testing Pruned Autoencoder: Batch {batch_idx}"
-                batch_pbar.set_description_str(batch_pbar_str)
-                out = self.forward(batch.clean)
-                pruned_logits.append(out)
-                if include_corrupt:
-                    out = self.forward(batch.corrupt)
-                    pruned_logits.append(out)
+#         flat_pruned_logits = t.flatten(t.stack(pruned_logits), end_dim=-2)
+#         flat_unpruned_logits = t.flatten(t.stack(unpruned_logits), end_dim=-2)
+#         kl_div = t.nn.functional.kl_div(
+#             t.nn.functional.log_softmax(flat_pruned_logits, dim=-1),
+#             t.nn.functional.log_softmax(flat_unpruned_logits, dim=-1),
+#             reduction="batchmean",
+#             log_target=True,
+#         )
 
-        flat_pruned_logits = t.flatten(t.stack(pruned_logits), end_dim=-2)
-        flat_unpruned_logits = t.flatten(t.stack(unpruned_logits), end_dim=-2)
-        kl_div = t.nn.functional.kl_div(
-            t.nn.functional.log_softmax(flat_pruned_logits, dim=-1),
-            t.nn.functional.log_softmax(flat_unpruned_logits, dim=-1),
-            reduction="batchmean",
-            log_target=True,
-        )
+#         print("Done. Autoencoder activated latent counts:", activated_latent_counts)
+#         print("Autoencoder latent counts:", latent_counts)
+#         print("Pruned vs. Unpruned KL Div:", kl_div.item())
 
-        print("Done. Autoencoder activated latent counts:", activated_latent_counts)
-        print("Autoencoder latent counts:", latent_counts)
-        print("Pruned vs. Unpruned KL Div:", kl_div.item())
+#     def run_with_cache(self, *args: Any, **kwargs: Any) -> Any:
+#         return self.wrapped_model.run_with_cache(*args, **kwargs)
 
-    def run_with_cache(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model.run_with_cache(*args, **kwargs)
+#     def run_with_hooks(self, *args: Any, **kwargs: Any) -> Any:
+#         return self.wrapped_model.run_with_hooks(*args, **kwargs)
 
-    def run_with_hooks(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model.run_with_hooks(*args, **kwargs)
+#     def add_hook(self, *args: Any, **kwargs: Any) -> Any:
+#         return self.wrapped_model.add_hook(*args, **kwargs)
 
-    def add_hook(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model.add_hook(*args, **kwargs)
+#     def reset_hooks(self) -> None:
+#         return self.wrapped_model.reset_hooks()
 
-    def reset_hooks(self) -> None:
-        return self.wrapped_model.reset_hooks()
+#     @property
+#     def cfg(self) -> Any:
+#         return self.wrapped_model.cfg
 
-    @property
-    def cfg(self) -> Any:
-        return self.wrapped_model.cfg
+#     @property
+#     def tokenizer(self) -> Any:
+#         return self.wrapped_model.tokenizer
 
-    @property
-    def tokenizer(self) -> Any:
-        return self.wrapped_model.tokenizer
+#     @property
+#     def input_to_embed(self) -> Any:
+#         return self.wrapped_model.input_to_embed
 
-    @property
-    def input_to_embed(self) -> Any:
-        return self.wrapped_model.input_to_embed
+#     @property
+#     def blocks(self) -> Any:
+#         return self.wrapped_model.blocks
 
-    @property
-    def blocks(self) -> Any:
-        return self.wrapped_model.blocks
+#     def to_tokens(self, *args: Any, **kwargs: Any) -> Any:
+#         return self.wrapped_model.to_tokens(*args, **kwargs)
 
-    def to_tokens(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model.to_tokens(*args, **kwargs)
+#     def to_str_tokens(self, *args: Any, **kwargs: Any) -> Any:
+#         return self.wrapped_model.to_str_tokens(*args, **kwargs)
 
-    def to_str_tokens(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model.to_str_tokens(*args, **kwargs)
+#     def to_string(self, *args: Any, **kwargs: Any) -> Any:
+#         return self.wrapped_model.to_string(*args, **kwargs)
 
-    def to_string(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_model.to_string(*args, **kwargs)
+#     def __str__(self) -> str:
+#         return self.wrapped_model.__str__()
 
-    def __str__(self) -> str:
-        return self.wrapped_model.__str__()
-
-    def __repr__(self) -> str:
-        return self.wrapped_model.__repr__()
+#     def __repr__(self) -> str:
+#         return self.wrapped_model.__repr__()
 
 
 def sae_model(
@@ -187,7 +179,7 @@ def sae_model(
         param.requires_grad = False
 
     for layer_idx in range(model.cfg.n_layers):
-        sae, cfg_dict, log_sparsities = SAE.from_pretrained(
+        sae, cfg_dict, log_sparsities = SAEWrapper.from_pretrained(
             sae_release_name,
             sae_id_template.format(layer_idx),
             device=device,
@@ -242,7 +234,7 @@ def factorized_src_nodes(model: HookedSAETransformer) -> Set[SrcNode]:
             nodes.add(
                 SrcNode(
                     name=f"MLP {block_idx} Latent {latent_idx}",
-                    module_name=f"{sae_blocks[block_idx].name}.hook_sae_recons",
+                    module_name=f"{sae_blocks[block_idx].name}.hook_sae_latents",
                     layer=layer,
                     src_idx=next(idxs),
                     head_dim=2,
@@ -255,7 +247,7 @@ def factorized_src_nodes(model: HookedSAETransformer) -> Set[SrcNode]:
 
 
 def factorized_dest_nodes(
-    model: AutoencoderTransformer, separate_qkv: bool
+    model: HookedSAETransformer, separate_qkv: bool
 ) -> Set[DestNode]:
     """Get the destination part of each edge in the factorized graph, grouped by layer.
     Graph is factorized following the Mathematical Framework paper."""

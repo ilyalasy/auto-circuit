@@ -270,11 +270,14 @@ class PatchFunction(t.autograd.Function):
         ctx.ein_pre_B = ein_pre_B
         ctx.ein_post = ein_post
         ctx.save_for_backward(patch_src_outs, curr_src_outs)
+        # ctx.patch_src_outs = patch_src_outs
+        # ctx.curr_src_outs = curr_src_outs
 
     @staticmethod
     @t.autograd.function.once_differentiable
     def backward(ctx: t.autograd.function.FunctionCtx, grad_output: t.Tensor):
         patch_src_outs, curr_src_outs = ctx.saved_tensors
+        # patch_src_outs, curr_src_outs = ctx.patch_src_outs, ctx.curr_src_outs
         d = _calculate_diff(patch_src_outs, curr_src_outs, ctx.in_srcs)
 
         grad_x = grad_output

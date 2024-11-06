@@ -63,6 +63,7 @@ class PatchWrapperImpl(PatchWrapper):
         seq_dim: Optional[int] = None,
         is_src: bool = False,
         src_idxs: Optional[slice] = None,
+        head_idxs: Optional[t.Tensor] = None,
         is_dest: bool = False,
         patch_mask: Optional[t.Tensor] = None,
         in_srcs: Optional[slice] = None,
@@ -74,6 +75,8 @@ class PatchWrapperImpl(PatchWrapper):
         self.seq_dim: Optional[int] = seq_dim
         self.curr_src_outs: Optional[t.Tensor] = None
         self.in_srcs: Optional[slice] = in_srcs
+
+        self.head_idxs: Optional[t.Tensor] = head_idxs
 
         self.is_src = is_src
         if self.is_src:
@@ -93,6 +96,12 @@ class PatchWrapperImpl(PatchWrapper):
         assert head_dim is None or seq_dim is None or head_dim > seq_dim
         dims = range(1, max(head_dim if head_dim else 2, seq_dim if seq_dim else 2))
         self.dims = " ".join(["seq" if i == seq_dim else f"d{i}" for i in dims])
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.module, name)
 
     def set_mask_batch_size(self, batch_size: int | None):
         """
@@ -144,21 +153,21 @@ class PatchWrapperImpl(PatchWrapper):
 
             ein_pre_A, ein_pre_B, ein_post = self._get_ein_strs()
 
-            # d = self.patch_src_outs[self.in_srcs] - self.curr_src_outs[self.in_srcs]
-            # arg_0 += einsum(
-            #     mask, d, f"{ein_pre_A}, {ein_pre_B} -> {ein_post}"
-            # )  # Add mask times diff
+            d = self.patch_src_outs[self.in_srcs] - self.curr_src_outs[self.in_srcs]
+            arg_0 += einsum(
+                mask, d, f"{ein_pre_A}, {ein_pre_B} -> {ein_post}"
+            )  # Add mask times diff
 
-            arg_0 = PatchFunction.apply(
-                arg_0,
-                mask,
-                self.patch_src_outs,
-                self.curr_src_outs,
-                self.in_srcs,
-                ein_pre_A,
-                ein_pre_B,
-                ein_post,
-            )  # type: ignore
+            # arg_0 = PatchFunction.apply(
+            #     arg_0,
+            #     mask,
+            #     self.patch_src_outs,
+            #     self.curr_src_outs,
+            #     self.in_srcs,
+            #     ein_pre_A,
+            #     ein_pre_B,
+            #     ein_post,
+            # )  # type: ignore
 
         new_args = (arg_0,) + args[1:]
         out = self.module(*new_args, **kwargs)
@@ -170,12 +179,15 @@ class PatchWrapperImpl(PatchWrapper):
             else:
                 squeeze_dim = self.head_dim if self.head_dim < 0 else self.head_dim + 1
                 src_out = t.stack(out.split(1, dim=self.head_dim)).squeeze(squeeze_dim)
+                if self.head_idxs is not None:
+                    src_out = src_out[self.head_idxs, ...]
+
             if self.curr_src_outs.is_sparse:
                 self.curr_src_outs = assign_sparse_tensor(
                     self.curr_src_outs, self.src_idxs, src_out
                 )
             else:
-                self.curr_src_outs[self.src_idxs] = src_out
+                self.curr_src_outs[self.src_idxs] = src_out.clone()
 
         return out
 
@@ -233,6 +245,9 @@ def _calculate_diff(patch_src_outs: t.Tensor, curr_src_outs: t.Tensor, in_srcs: 
         return patch_src_outs[in_srcs] - curr_src_outs[in_srcs]
 
 
+from torchsparsegradutils import sparse_mm
+
+
 class PatchFunction(t.autograd.Function):
 
     @staticmethod
@@ -284,6 +299,12 @@ class PatchFunction(t.autograd.Function):
         grad_mask = einsum(
             grad_output, d, f"{ctx.ein_post}, {ctx.ein_pre_B} -> {ctx.ein_pre_A}"
         )
+        #  # Reshape tensors to 2D matrices for matrix multiplication
+        # grad_output_flat = grad_output.reshape(-1, d.size(-1))  # (batch*d1*dest, d1)
+        # d_flat = d.transpose(-2, -1).reshape(d.size(-1), -1)  # (d1, src*batch*d1)
+        # grad_mask_flat = grad_output_flat @ d_flat  # (batch*d1*dest, src*batch*d1)
+        # # Reshape back to original dimensions
+        # grad_mask = grad_mask_flat.reshape(grad_output.shape[0], grad_output.shape[2], d.shape[0])  # (batch, dest, src)
 
         # del ctx.patch_src_outs, ctx.curr_src_outs
         return grad_x, grad_mask, None, None, None, None, None, None

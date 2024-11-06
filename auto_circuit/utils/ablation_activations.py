@@ -3,11 +3,14 @@ from functools import partial
 from typing import Dict, List, Literal, Optional
 
 import torch as t
+from sae_lens import HookedSAETransformer
+from tqdm import tqdm
 from transformer_lens.hook_points import HookPoint
 
 from auto_circuit.data import BatchKey, PromptDataLoader
 from auto_circuit.types import AblationType, SrcNode
 from auto_circuit.utils.patchable_model import PatchableModel
+from auto_circuit.utils.tensor_ops import assign_sparse_tensor
 
 
 class LazyAblations:
@@ -55,8 +58,9 @@ def src_out_hook(
     out: t.Tensor,
     hook: HookPoint,
     src_nodes: List[SrcNode],
-    src_outs: Dict[SrcNode, t.Tensor],
+    src_outs: Dict[SrcNode, t.Tensor],  # t.Tensor
     ablation_type: AblationType,
+    use_sparse: bool = False,
 ):
     assert not ablation_type.mean_over_dataset
     if ablation_type == AblationType.RESAMPLE:
@@ -75,7 +79,8 @@ def src_out_hook(
     head_dim: Optional[int] = src_nodes[0].head_dim
     out = out if head_dim is None else out.split(1, dim=head_dim)
     for s in src_nodes:
-        src_outs[s] = out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
+        src_out = out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
+        src_outs[s] = src_out.to_sparse() if use_sparse else src_out
 
 
 def mean_src_out_hook(
@@ -84,6 +89,7 @@ def mean_src_out_hook(
     src_nodes: List[SrcNode],
     src_outs: Dict[SrcNode, t.Tensor],
     ablation_type: AblationType,
+    use_sparse: bool = False,
 ):
     assert ablation_type.mean_over_dataset
     repeats = [out.size(0)] + [1] * (out.ndim - 1)
@@ -93,6 +99,8 @@ def mean_src_out_hook(
     out = out if head_dim is None else out.split(1, dim=head_dim)
     for s in src_nodes:
         src_out = out if head_dim is None else out[s.head_idx].squeeze(s.head_dim)
+        if use_sparse:
+            src_out = src_out.to_sparse()
         if s not in src_outs:
             src_outs[s] = src_out
         else:
@@ -103,6 +111,7 @@ def src_ablations(
     model: PatchableModel,
     sample: t.Tensor | PromptDataLoader,
     ablation_type: AblationType = AblationType.RESAMPLE,
+    use_sparse: bool = False,
 ) -> t.Tensor:
     """
     Get the activations used to ablate each [`Edge`][auto_circuit.types.Edge] in a
@@ -123,9 +132,19 @@ def src_ablations(
             shape of the activations of the model. In a transformer this will be
             `[Srcs, batch, seq, d_model]`.
     """
-    src_outs: Dict[SrcNode, t.Tensor] = {}
+    # use_sparse = isinstance(model.wrapped_model, HookedSAETransformer)
+
     src_modules: Dict[t.nn.Module, List[SrcNode]] = defaultdict(list)
     [src_modules[src.module(model)].append(src) for src in model.srcs]
+    # Flatten src_modules.values() into a single list of SrcNodes
+    # all_src_nodes = [src for src_list in src_modules.values() for src in src_list]
+    # # Sort the flattened list by src_idx to maintain consistent ordering
+    # if isinstance(sample, PromptDataLoader):
+    #     shape = sample.dataset[0].clean.shape
+    # else:
+    #     shape = sample.shape
+
+    src_outs: Dict[SrcNode, t.Tensor] = {}
     hooks = []
     for mod, src_nodes in src_modules.items():
         hook_fn = partial(
@@ -133,17 +152,19 @@ def src_ablations(
             src_nodes=src_nodes,
             src_outs=src_outs,
             ablation_type=ablation_type,
+            use_sparse=use_sparse,
         )
         hooks.append((mod.module_name, hook_fn))
 
     if ablation_type.mean_over_dataset:
         # Collect activations over the entire dataset a nd take the mean
         assert isinstance(sample, PromptDataLoader)
-        for batch in sample:
-            if ablation_type.clean_dataset:
-                model.run_with_hooks(batch.clean, fwd_hooks=hooks)
-            if ablation_type.corrupt_dataset:
-                model.run_with_hooks(batch.corrupt, fwd_hooks=hooks)
+        with model.wrapped_model.hooks(fwd_hooks=hooks):
+            for batch in tqdm(sample, total=len(sample), desc="Computing ablations"):
+                if ablation_type.clean_dataset:
+                    model(batch.clean)
+                if ablation_type.corrupt_dataset:
+                    model(batch.corrupt)
         # PromptDataLoader has equal size batches, so we can take the mean of means
         mult = int(ablation_type.clean_dataset) + int(ablation_type.corrupt_dataset)
         assert mult == 2 or mult == 1
@@ -156,7 +177,7 @@ def src_ablations(
     # Sort the src_outs dict by node idx
     src_outs = dict(sorted(src_outs.items(), key=lambda x: x[0].src_idx))
     assert [src.src_idx for src in src_outs.keys()] == list(range(len(src_outs)))
-    return t.stack(list(src_outs.values())).detach()
+    return t.stack(list(src_outs.values())).detach()  # src_outs_t.detach()
 
 
 def src_ablations_lazy(

@@ -30,6 +30,87 @@ from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import desc_prune_scores
 
 
+def load_patchable_model(
+    model: t.nn.Module,
+    factorized: bool,
+    nodes_path: str,
+    slice_output: OutputSlice = None,
+    seq_len: Optional[int] = None,
+    separate_qkv: Optional[bool] = None,
+    kv_caches: Tuple[Optional[HookedTransformerKeyValueCache], ...] = (None,),
+    device: t.device = t.device("cpu"),
+    ignore_tokens: Optional[Set[int]] = None,
+) -> PatchableModel:
+    """
+    Wrap a model and inject [`PatchWrapper`][auto_circuit.types.PatchWrapper]s into the
+    node modules to enable patching.
+
+    Args:
+        model: The model to make patchable.
+        factorized: Whether the model is factorized, for Edge Ablation. Otherwise,
+            only Node Ablation is possible.
+        slice_output: Specifies the index/slice of the output of the model to be
+            considered for the task. For example, `"last_seq"` will consider the last
+            token's output in transformer models.
+        seq_len: The sequence length of the model inputs. If `None`, all token positions
+            are simultaneously ablated.
+        separate_qkv: Whether the model has separate query, key, and value inputs. Only
+            used for transformers.
+        kv_caches: The key and value caches for the transformer. Only used for
+            transformers.
+        device: The device that the model is on.
+
+    Returns:
+        The patchable model.
+
+    Warning:
+        This function modifies the model, it does not return a new model.
+    """
+    assert not isinstance(model, PatchableModel), "Modx el is already patchable"
+
+    seq_dim = 1
+    nodes_info = t.load(nodes_path)
+    nodes = nodes_info["nodes"]
+    srcs = nodes_info["srcs"]
+    dests = nodes - srcs
+    edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
+    for i in [None] if seq_len is None else range(seq_len):
+        pairs = product(srcs, dests)
+        edge_dict[i] = [Edge(s, d, i) for s, d in pairs if s.layer < d.layer]
+    edges = set(list(chain.from_iterable(edge_dict.values())))
+
+    wrappers, src_wrappers, dest_wrappers = make_model_patchable(
+        model, factorized, srcs, nodes, device, seq_len, seq_dim
+    )
+    if slice_output is None:
+        out_slice: Tuple[slice | int, ...] = (slice(None),)
+    else:
+        last_slice = [-1] if slice_output == "last_seq" else [slice(1, None)]
+        out_slice: Tuple[slice | int, ...] = tuple([slice(None)] * seq_dim + last_slice)
+    is_autoencoder_transformer = isinstance(model, HookedSAETransformer)
+    is_tl_transformer = isinstance(model, HookedTransformer)
+    is_transformer = is_tl_transformer or is_autoencoder_transformer
+    return PatchableModel(
+        nodes=nodes,
+        srcs=srcs,
+        dests=dests,
+        edge_dict=edge_dict,
+        edges=edges,
+        seq_dim=seq_dim,
+        seq_len=seq_len,
+        wrappers=wrappers,
+        src_wrappers=src_wrappers,
+        dest_wrappers=dest_wrappers,
+        out_slice=out_slice,
+        is_factorized=factorized,
+        is_transformer=is_transformer,
+        separate_qkv=separate_qkv,
+        kv_caches=kv_caches,
+        wrapped_model=model,
+        ignore_tokens=ignore_tokens,
+    )
+
+
 def patchable_model(
     model: t.nn.Module,
     factorized: bool,
@@ -224,12 +305,22 @@ def make_model_patchable(
     for module_name, module_nodes in node_dict.items():
         module = module_by_name(model, module_name)
         src_idxs_slice = None
+        head_idxs = None
         a_node = next(iter(module_nodes))
         head_dim = a_node.head_dim
         assert all([node.head_dim == head_dim for node in module_nodes])
 
         if is_src := any([type(node) == SrcNode for node in module_nodes]):
             src_idxs = [n.src_idx for n in module_nodes if type(n) == SrcNode]
+            head_idxs = [
+                n.head_idx
+                for n in module_nodes
+                if type(n) == SrcNode and n.head_idx is not None
+            ]
+            if len(head_idxs) > 0:
+                head_idxs = t.tensor(head_idxs, device=device)
+            else:
+                head_idxs = None
             src_idxs_slice = slice(min(src_idxs), max(src_idxs) + 1)
             assert src_idxs_slice.stop - src_idxs_slice.start == len(src_idxs)
 
@@ -255,6 +346,7 @@ def make_model_patchable(
             seq_dim=None if seq_len is None else seq_dim,  # Patch tokens separately
             is_src=is_src,
             src_idxs=src_idxs_slice,
+            head_idxs=head_idxs,
             is_dest=is_dest,
             patch_mask=mask,
             in_srcs=in_srcs,

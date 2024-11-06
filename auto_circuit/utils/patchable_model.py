@@ -1,4 +1,5 @@
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import Any, Collection, Dict, List, Optional, Set, Tuple
 
 import torch as t
@@ -6,6 +7,7 @@ from transformer_lens import HookedTransformer
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCache
 
 from auto_circuit.types import DestNode, Edge, Node, PruneScores, SrcNode
+from auto_circuit.utils.misc import module_by_name, set_module_by_name
 from auto_circuit.utils.patch_wrapper import PatchWrapperImpl
 
 
@@ -165,6 +167,10 @@ class PatchableModel(t.nn.Module):
     def run_with_hooks(self, *args: Any, **kwargs: Any) -> Any:
         return self.wrapped_model.run_with_hooks(*args, **kwargs)
 
+    @contextmanager
+    def hooks(self, *args: Any, **kwargs: Any) -> Any:
+        return self.wrapped_model.hooks(*args, **kwargs)
+
     def input_to_embed(self, *args: Any, **kwargs: Any) -> Any:
         """
         Wrapper around the `input_to_embed` method of the wrapped TransformerLens
@@ -247,6 +253,10 @@ class PatchableModel(t.nn.Module):
     def reset_hooks(self) -> Any:
         return self.wrapped_model.reset_hooks()
 
+    def reset_modules(self) -> None:
+        for wrapper in self.wrappers:
+            set_module_by_name(self.wrapped_model, wrapper.module_name, wrapper.module)
+
     @property
     def cfg(self) -> Any:
         return self.wrapped_model.cfg
@@ -273,3 +283,10 @@ class PatchableModel(t.nn.Module):
 
     def __repr__(self) -> str:
         return self.wrapped_model.__repr__()
+
+    def save(self, path: str = "model_nodes.pt") -> None:
+        state_dict = {
+            "srcs": self.srcs,
+            "nodes": self.nodes,
+        }
+        t.save(state_dict, path)

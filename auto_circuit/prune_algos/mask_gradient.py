@@ -88,7 +88,6 @@ def mask_gradient_prune_scores(
                             batch.clean if clean_corrupt == "clean" else batch.corrupt
                         )
                     patch_src_outs = src_ablations(model, input_batch, ablation_type)
-                    patch_src_outs = patch_src_outs.to_sparse()
                 with patch_mode(model, patch_src_outs):
                     logits = model(batch.clean)[out_slice]
                     if grad_function == "logit":

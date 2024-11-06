@@ -245,9 +245,6 @@ def _calculate_diff(patch_src_outs: t.Tensor, curr_src_outs: t.Tensor, in_srcs: 
         return patch_src_outs[in_srcs] - curr_src_outs[in_srcs]
 
 
-from torchsparsegradutils import sparse_mm
-
-
 class PatchFunction(t.autograd.Function):
 
     @staticmethod

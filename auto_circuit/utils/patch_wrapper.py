@@ -153,21 +153,21 @@ class PatchWrapperImpl(PatchWrapper):
 
             ein_pre_A, ein_pre_B, ein_post = self._get_ein_strs()
 
-            d = self.patch_src_outs[self.in_srcs] - self.curr_src_outs[self.in_srcs]
-            arg_0 += einsum(
-                mask, d, f"{ein_pre_A}, {ein_pre_B} -> {ein_post}"
-            )  # Add mask times diff
+            # d = self.patch_src_outs[self.in_srcs] - self.curr_src_outs[self.in_srcs]
+            # arg_0 += einsum(
+            #     mask, d, f"{ein_pre_A}, {ein_pre_B} -> {ein_post}"
+            # )  # Add mask times diff
 
-            # arg_0 = PatchFunction.apply(
-            #     arg_0,
-            #     mask,
-            #     self.patch_src_outs,
-            #     self.curr_src_outs,
-            #     self.in_srcs,
-            #     ein_pre_A,
-            #     ein_pre_B,
-            #     ein_post,
-            # )  # type: ignore
+            arg_0 = PatchFunction.apply(
+                arg_0,
+                mask,
+                self.patch_src_outs,
+                self.curr_src_outs,
+                self.in_srcs,
+                ein_pre_A,
+                ein_pre_B,
+                ein_post,
+            )  # type: ignore
 
         new_args = (arg_0,) + args[1:]
         out = self.module(*new_args, **kwargs)
@@ -187,11 +187,13 @@ class PatchWrapperImpl(PatchWrapper):
                     src_out = src_out[self.head_idxs, ...]
 
             if self.curr_src_outs.is_sparse:
-                self.curr_src_outs = assign_sparse_tensor(
+                new_src_outs = assign_sparse_tensor(
                     self.curr_src_outs, self.src_idxs, src_out
                 )
             else:
-                self.curr_src_outs[self.src_idxs] = src_out
+                new_src_outs = self.curr_src_outs.clone()
+                new_src_outs[self.src_idxs] = src_out
+            self.curr_src_outs = new_src_outs
 
         return out
 
@@ -286,8 +288,6 @@ class PatchFunction(t.autograd.Function):
         ctx.ein_pre_B = ein_pre_B
         ctx.ein_post = ein_post
         ctx.save_for_backward(patch_src_outs, curr_src_outs)
-        # ctx.patch_src_outs = patch_src_outs
-        # ctx.curr_src_outs = curr_src_outs
 
     @staticmethod
     @t.autograd.function.once_differentiable

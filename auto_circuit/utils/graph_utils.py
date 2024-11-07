@@ -2,18 +2,22 @@
 import math
 from collections import defaultdict
 from contextlib import contextmanager
-from itertools import chain, product
+from itertools import chain, count, product
 from typing import Collection, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch as t
 from sae_lens import HookedSAETransformer
+from tqdm import tqdm
 from transformer_lens import HookedTransformer, HookedTransformerKeyValueCache
 
 import auto_circuit.model_utils.micro_model_utils as mm_utils
 import auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer as sae_utils
 import auto_circuit.model_utils.transformer_lens_utils as tl_utils
+from auto_circuit.data import PromptDataLoader
 from auto_circuit.model_utils.micro_model_utils import MicroModel
+from auto_circuit.model_utils.sparse_autoencoders.sparse_autoencoder import SAEWrapper
 from auto_circuit.types import (
+    AblationType,
     DestNode,
     Edge,
     EdgeCounts,
@@ -24,10 +28,106 @@ from auto_circuit.types import (
     SrcNode,
     TestEdges,
 )
+from auto_circuit.utils.ablation_activations import src_ablations
 from auto_circuit.utils.misc import module_by_name, set_module_by_name
 from auto_circuit.utils.patch_wrapper import PatchWrapperImpl
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import desc_prune_scores
+
+
+def prune_latents_with_dataset(
+    model: PatchableModel,
+    dataloader: PromptDataLoader,
+    max_latents: Optional[int],
+    include_corrupt: bool = False,
+    seq_len: Optional[int] = None,
+):
+    """
+    Prune the weights of the autoencoder to remove latents that are never activated
+    by the dataset. This can reduce the number of edges in the factorized model by a
+    factor of 10 or more.
+    """
+    assert isinstance(
+        model.wrapped_model, HookedSAETransformer
+    ), "Model must be a HookedSAETransformer to prune latents with dataset."
+
+    # src_outs = src_ablations(
+    #     model,
+    #     dataloader.dataset[0].clean,
+    #     AblationType.RESAMPLE,
+    # )
+    with t.no_grad():
+        src_outs = src_ablations(
+            model,
+            dataloader,
+            (
+                AblationType.TOKENWISE_MEAN_CLEAN_AND_CORRUPT
+                if include_corrupt
+                else AblationType.TOKENWISE_MEAN_CLEAN
+            ),
+            use_sparse=True,
+        )
+
+    src_modules: Dict[t.nn.Module, List[SrcNode]] = defaultdict(list)
+    [src_modules[src.module(model)].append(src) for src in model.srcs]
+    idx_count = count()
+    new_srcs = set()
+    for module, srcs in (pbar := tqdm(src_modules.items())):
+        pbar.set_description_str(f"Processing Module {module}")
+        for src in srcs:
+            if src_outs[src.src_idx]._nnz() != 0:
+                new_srcs.add(
+                    SrcNode(
+                        name=src.name,
+                        module_name=src.module_name,
+                        layer=src.layer,
+                        src_idx=next(idx_count),
+                        head_dim=src.head_dim,
+                        head_idx=src.head_idx,
+                        weight=src.weight,
+                        weight_head_dim=src.weight_head_dim,
+                    )
+                )
+
+    srcs = set(new_srcs)
+    dests = set(model.dests)
+
+    edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
+    for i in [None] if seq_len is None else range(seq_len):
+        pairs = product(srcs, dests)
+        edge_dict[i] = [Edge(s, d, i) for s, d in pairs if s.layer < d.layer]
+    nodes: Set[Node] = set(srcs | dests)
+    edges = set(list(chain.from_iterable(edge_dict.values())))
+
+    model.reset_modules()
+    wrappers, src_wrappers, dest_wrappers = make_model_patchable(
+        model.wrapped_model,
+        model.is_factorized,
+        srcs,
+        nodes,
+        src_outs.device,
+        model.seq_len,
+        model.seq_dim,
+    )
+    return PatchableModel(
+        nodes=nodes,
+        srcs=srcs,
+        dests=dests,
+        edge_dict=edge_dict,
+        edges=edges,
+        seq_dim=model.seq_dim,
+        seq_len=model.seq_len,
+        wrappers=wrappers,
+        src_wrappers=src_wrappers,
+        dest_wrappers=dest_wrappers,
+        out_slice=model.out_slice,
+        is_factorized=model.is_factorized,
+        is_transformer=model.is_transformer,
+        separate_qkv=model.separate_qkv,
+        kv_caches=model.kv_caches if model.kv_caches is not None else [],
+        wrapped_model=model.wrapped_model,
+        ignore_tokens=model.ignore_tokens,
+    )
 
 
 def load_patchable_model(
@@ -73,6 +173,10 @@ def load_patchable_model(
     nodes = nodes_info["nodes"]
     srcs = nodes_info["srcs"]
     dests = nodes - srcs
+
+    model, srcs = sae_utils.prune_weights_(model, srcs)
+    nodes = srcs | dests
+
     edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
     for i in [None] if seq_len is None else range(seq_len):
         pairs = product(srcs, dests)

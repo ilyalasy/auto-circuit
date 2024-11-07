@@ -1,4 +1,5 @@
 import einops
+import torch as t
 import torch.profiler
 from jaxtyping import Float
 from sae_lens.sae import SAE, SAEConfig
@@ -42,6 +43,23 @@ class SAEWrapper(SAE):
         sae_out = self.reshape_fn_out(sae_out, self.d_head)  # type: ignore
 
         return sae_out
+
+    def prune_latents(self, idxs: torch.Tensor):
+        # state = self.state_dict()
+        # new_state = state.copy()
+        # new_state["W_enc"] = state["W_enc"][:, idxs].clone()
+        # new_state["W_dec"] = state["W_dec"][idxs].clone()
+        # new_state["b_enc"] = state["b_enc"][idxs].clone()
+        # self.W_enc = t.nn.Parameter(t.zeros_like(new_state["W_enc"]))
+        # self.W_dec = t.nn.Parameter(t.zeros_like(new_state["W_dec"]))
+        # self.b_enc = t.nn.Parameter(t.zeros_like(new_state["b_enc"]))
+        # del state
+        # self.load_state_dict(new_state, assign=True, strict=True)
+
+        self.W_enc = t.nn.Parameter(self.W_enc[:, idxs])
+        self.W_dec = t.nn.Parameter(self.W_dec[idxs])
+        self.b_enc = t.nn.Parameter(self.b_enc[idxs])
+        self.cfg.d_sae = idxs.shape[0]
 
 
 # class SparseAutoencoder(t.nn.Module):
@@ -112,7 +130,7 @@ class SAEWrapper(SAE):
 #             "decode_weight": state["decode_weight"].T[idxs].transpose(-1, -2).clone(),
 #         }
 #         del state
-#         self.init_params(*list(reversed(new_state_dict["decode_weight"].shape)))
+# self.init_params(*list(reversed(new_state_dict["decode_weight"].shape)))
 #         self.load_state_dict(new_state_dict, assign=True, strict=True)
 #         self.reset_activated_latents()
 

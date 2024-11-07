@@ -178,7 +178,11 @@ class PatchWrapperImpl(PatchWrapper):
                 src_out = out
             else:
                 squeeze_dim = self.head_dim if self.head_dim < 0 else self.head_dim + 1
-                src_out = t.stack(out.split(1, dim=self.head_dim)).squeeze(squeeze_dim)
+                src_out = (
+                    out.unsqueeze(0)
+                    .transpose(self.head_dim + 1, 0)
+                    .squeeze(squeeze_dim)
+                )
                 if self.head_idxs is not None:
                     src_out = src_out[self.head_idxs, ...]
 
@@ -187,7 +191,7 @@ class PatchWrapperImpl(PatchWrapper):
                     self.curr_src_outs, self.src_idxs, src_out
                 )
             else:
-                self.curr_src_outs[self.src_idxs] = src_out.clone()
+                self.curr_src_outs[self.src_idxs] = src_out
 
         return out
 

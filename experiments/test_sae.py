@@ -1,13 +1,13 @@
 import torch as t
 
 from auto_circuit.data import PromptDataLoader, load_datasets_from_json
+from auto_circuit.experiment_utils import load_tl_model
 from auto_circuit.metrics.official_circuits.circuits.ioi_official import ioi_true_edges
 from auto_circuit.metrics.prune_metrics.answer_diff_percent import answer_diff_percent
 from auto_circuit.metrics.prune_metrics.correct_answer_percent import (
     measure_correct_ans_percent,
 )
 from auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer import (
-    prune_latents_with_dataset,
     sae_model,
 )
 from auto_circuit.prune import run_circuits
@@ -17,6 +17,7 @@ from auto_circuit.utils.graph_utils import (
     edge_counts_util,
     load_patchable_model,
     patchable_model,
+    prune_latents_with_dataset,
 )
 from auto_circuit.utils.misc import repo_path_to_abs_path
 from auto_circuit.utils.patchable_model import PatchableModel
@@ -102,15 +103,15 @@ def main():
         device = "cpu"
     # device = "cpu"  # t.device("cpu")
     # Load the model
-    # model_name = "pythia-70m-deduped"
-    # sae_release_name = "pythia-70m-deduped-mlp-sm"
-    # sae_layer_name = "blocks.{}.hook_mlp_out"
-
-    model_name = "gpt2"
-    sae_release_name = (
-        "gpt2-small-mlp-tm"  # "gpt2-small-res-jb" # TODO: doesn't work with residuals
-    )
+    model_name = "pythia-70m-deduped"
+    sae_release_name = "pythia-70m-deduped-mlp-sm"
     sae_layer_name = "blocks.{}.hook_mlp_out"
+
+    # model_name = "gpt2"
+    # sae_release_name = (
+    #     "gpt2-small-mlp-tm"  # "gpt2-small-res-jb" # TODO: doesn't work with residuals
+    # )
+    # sae_layer_name = "blocks.{}.hook_mlp_out"
 
     # Load the model using load_tl_model from experiment_utils
 
@@ -121,6 +122,8 @@ def main():
         sae_layer_name,
         device=device,
     )
+
+    # model = load_tl_model(model_name, device=device)
 
     # Load the dataset
     # dataset_name = "datasets/ioi/ioi_vanilla_template_prompts.json"
@@ -140,24 +143,24 @@ def main():
         pad=True,
     )
 
-    # model = load_patchable_model(
-    #     model,
-    #     factorized=True,
-    #     nodes_path="experiments/pruned_nodes_full_dataset.pt",
-    #     slice_output="last_seq",
-    #     separate_qkv=True,
-    #     device=device,
-    # )
-
-    model = patchable_model(
+    model = load_patchable_model(
         model,
         factorized=True,
+        nodes_path="experiments/pruned_nodes_full_dataset.pt",
         slice_output="last_seq",
         separate_qkv=True,
         device=device,
     )
-    model = prune_latents_with_dataset(model, train_dataloader, None)
-    model.save("gpt2_pruned_nodes_full_dataset.pt")
+
+    # model = patchable_model(
+    #     model,
+    #     factorized=True,
+    #     slice_output="last_seq",
+    #     separate_qkv=True,
+    #     device=device,
+    # )
+    # model = prune_latents_with_dataset(model, train_dataloader, None)
+    # model.save("gpt2_pruned_nodes_full_dataset.pt")
 
     prune_scores, circuits_out = find_circuits(
         model,

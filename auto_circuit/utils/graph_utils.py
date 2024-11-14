@@ -517,6 +517,20 @@ def patch_mode(
         del curr_src_outs, patch_src_outs
 
 
+@contextmanager
+def turn_off_src_behaviour(
+    model: PatchableModel,
+):
+    for wrapper in model.src_wrappers:
+        wrapper.is_src = False
+
+    try:
+        yield
+    finally:
+        for wrapper in model.src_wrappers:
+            wrapper.is_src = True
+
+
 def set_all_masks(model: PatchableModel, val: float) -> None:
     """
     Set all the patch masks in the model to the specified value.

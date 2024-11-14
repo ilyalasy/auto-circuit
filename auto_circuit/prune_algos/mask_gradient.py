@@ -7,7 +7,12 @@ from auto_circuit.data import PromptDataLoader
 from auto_circuit.types import AblationType, Edge, PruneScores
 from auto_circuit.utils.ablation_activations import src_ablations
 from auto_circuit.utils.custom_tqdm import tqdm
-from auto_circuit.utils.graph_utils import patch_mode, set_all_masks, train_mask_mode
+from auto_circuit.utils.graph_utils import (
+    patch_mode,
+    set_all_masks,
+    train_mask_mode,
+    turn_off_src_behaviour,
+)
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import batch_avg_answer_diff, batch_avg_answer_val
 
@@ -89,7 +94,14 @@ def mask_gradient_prune_scores(
                         )
                     patch_src_outs = src_ablations(model, input_batch, ablation_type)
                 with patch_mode(model, patch_src_outs):
-                    logits = model(batch.clean)[out_slice]
+                    # calculate curr_src_outs first
+                    with t.no_grad():
+                        model(batch.clean)
+
+                    # Turn off SRC behaviour, i.e. don't change curr_src_outs
+                    with turn_off_src_behaviour(model):
+                        logits = model(batch.clean)[out_slice]
+
                     if grad_function == "logit":
                         token_vals = logits
                     elif grad_function == "prob":

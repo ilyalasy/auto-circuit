@@ -13,47 +13,6 @@ from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import assign_sparse_tensor
 
 
-class LazyAblations:
-    """
-    A lazy container for source nodes activations.
-
-    This class computes and stores activations used to ablate each
-    [`Edge`][auto_circuit.types.Edge] in a model, given a particular set of model inputs
-    and an ablation type.
-    See[`AblationType`][auto_circuit.types.AblationType] for the different types of
-    ablations that can be computed.
-
-    Will not store activations in memory if there are too many source nodes (e.g. SAE).
-
-    Attributes:
-        data (t.Tensor): Cached source node activations, if precomputed, else will be computed on access.
-    """
-
-    def __init__(
-        self,
-        model: PatchableModel,
-        sample: t.Tensor | PromptDataLoader,
-        ablation_type: AblationType,
-    ):
-        self._model = model
-        self._sample = sample
-        self._ablation_type = ablation_type
-        self._data: Optional[t.Tensor] = None
-        # if a lot of source nodes, we don't want to store the activations in memory
-        if len(self._model.srcs) < 20000:
-            self._data = self._compute()
-
-    @property
-    def data(self) -> t.Tensor:
-        if self._data is None:
-            return self._compute()
-        return self._data
-
-    @t.no_grad()
-    def _compute(self):
-        return src_ablations(self._model, self._sample, self._ablation_type)
-
-
 def src_out_hook(
     out: t.Tensor,
     hook: HookPoint,
@@ -180,41 +139,12 @@ def src_ablations(
     return t.stack(list(src_outs.values())).detach()  # src_outs_t.detach()
 
 
-def src_ablations_lazy(
-    model: PatchableModel,
-    sample: t.Tensor | PromptDataLoader,
-    ablation_type: AblationType = AblationType.RESAMPLE,
-) -> LazyAblations:
-    """
-    Get the activations used to ablate each [`Edge`][auto_circuit.types.Edge] in a
-    model, given a particular set of model inputs and an ablation type. See
-    [`AblationType`][auto_circuit.types.AblationType] for the different types of
-    ablations that can be computed.
-
-    Args:
-        model: The model to get the ablations for.
-        sample: The data sample to get the ablations for. This is not used for all
-            `ablation_type`s. Either a single batch of inputs or a DataLoader.
-        ablation_type: The type of ablation to perform.
-
-    Returns:
-        A LazyAblations object containing activations used to ablate each
-        [`Edge`][auto_circuit.types.Edge] in the model on the given input.
-        When accessed, the data property will have shape `[Srcs, ...]` where `Srcs`
-        is the number of [`SrcNode`][auto_circuit.types.SrcNode]s in the model and
-        `...` is the shape of the activations of the model. In a transformer this
-        will be `[Srcs, batch, seq, d_model]`.
-    """
-
-    return LazyAblations(model, sample, ablation_type)
-
-
 def batch_src_ablations(
     model: PatchableModel,
     dataloader: PromptDataLoader,
     ablation_type: AblationType = AblationType.RESAMPLE,
     clean_corrupt: Optional[Literal["clean", "corrupt"]] = None,
-) -> Dict[BatchKey, LazyAblations]:
+) -> Dict[BatchKey, t.Tensor]:
     """
     Wrapper of [`src_ablations`][auto_circuit.utils.ablation_activations.src_ablations]
     that returns ablations for each batch in a dataloader.
@@ -240,7 +170,7 @@ def batch_src_ablations(
 
     patch_outs: Dict[BatchKey, LazyAblations] = {}
     if ablation_type.mean_over_dataset:
-        mean_patch = src_ablations_lazy(model, dataloader, ablation_type)
+        mean_patch = src_ablations(model, dataloader, ablation_type)
         patch_outs = {batch.key: mean_patch for batch in dataloader}
     else:
         for batch in dataloader:
@@ -248,7 +178,5 @@ def batch_src_ablations(
                 input_batch = batch.clean
             else:
                 input_batch = batch.clean if clean_corrupt == "clean" else batch.corrupt
-            patch_outs[batch.key] = src_ablations_lazy(
-                model, input_batch, ablation_type
-            )
+            patch_outs[batch.key] = src_ablations(model, input_batch, ablation_type)
     return patch_outs

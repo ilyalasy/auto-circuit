@@ -187,13 +187,34 @@ class PatchWrapperImpl(PatchWrapper):
                     src_out = src_out[self.head_idxs, ...]
 
             if self.curr_src_outs.is_sparse:
-                new_src_outs = assign_sparse_tensor(
+                self.curr_src_outs = assign_sparse_tensor(
                     self.curr_src_outs, self.src_idxs, src_out
                 )
             else:
-                new_src_outs = self.curr_src_outs.clone()
-                new_src_outs[self.src_idxs] = src_out
-            self.curr_src_outs = new_src_outs
+                ## Option 1
+                # self.curr_src_outs = src_out
+                self.curr_src_outs[self.src_idxs] = src_out
+
+                ## Option 2
+                # new_shape = [1] * (self.curr_src_outs.ndim - src_out.ndim) + [
+                #     *src_out.shape
+                # ]
+                # self.curr_src_outs.index_copy_(
+                #     0,
+                #     t.arange(
+                #         self.src_idxs.start, self.src_idxs.stop, device=src_out.device
+                #     ),
+                #     src_out.view(*new_shape),
+                # )
+
+                ## Option 3
+                # new_curr_src_outs = self.curr_src_outs.clone()
+                # new_curr_src_outs[self.src_idxs] = src_out
+                # self.tensor_observable.notify_observers(new_curr_src_outs)
+
+                ## Option 4
+                # self.curr_src_outs = new_curr_src_outs
+                # self.curr_src_outs.copy_(new_curr_src_outs)
 
         return out
 
@@ -292,22 +313,13 @@ class PatchFunction(t.autograd.Function):
     @staticmethod
     @t.autograd.function.once_differentiable
     def backward(ctx: t.autograd.function.FunctionCtx, grad_output: t.Tensor):
-        patch_src_outs, curr_src_outs = ctx.saved_tensors
-        # patch_src_outs, curr_src_outs = ctx.patch_src_outs, ctx.curr_src_outs
+        (patch_src_outs, curr_src_outs) = ctx.saved_tensors
         d = _calculate_diff(patch_src_outs, curr_src_outs, ctx.in_srcs)
 
         grad_x = grad_output
         grad_mask = einsum(
             grad_output, d, f"{ctx.ein_post}, {ctx.ein_pre_B} -> {ctx.ein_pre_A}"
         )
-        #  # Reshape tensors to 2D matrices for matrix multiplication
-        # grad_output_flat = grad_output.reshape(-1, d.size(-1))  # (batch*d1*dest, d1)
-        # d_flat = d.transpose(-2, -1).reshape(d.size(-1), -1)  # (d1, src*batch*d1)
-        # grad_mask_flat = grad_output_flat @ d_flat  # (batch*d1*dest, src*batch*d1)
-        # # Reshape back to original dimensions
-        # grad_mask = grad_mask_flat.reshape(grad_output.shape[0], grad_output.shape[2], d.shape[0])  # (batch, dest, src)
-
-        # del ctx.patch_src_outs, ctx.curr_src_outs
         return grad_x, grad_mask, None, None, None, None, None, None
 
 

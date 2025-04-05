@@ -98,7 +98,7 @@ def run_circuits(
                         dest.patch_mask.data = (patch_mask.abs() < threshold).float()
                         patch_edge_count += (1 - dest.patch_mask.int()).sum().item()
                 with t.inference_mode():
-                    model_output = model(batch_input)[model.out_slice]
+                    model_output = model(**batch_input)[model.out_slice]
                 circ_outs[patch_edge_count][batch.key] = model_output.detach().clone()
             if render_graph:
                 draw_seq_graph(

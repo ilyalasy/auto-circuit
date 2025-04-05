@@ -255,11 +255,11 @@ class PatchableModel(t.nn.Module):
     def blocks(self) -> Any:
         return self.wrapped_model.blocks
 
-    def to_tokens(self) -> Any:
-        return self.wrapped_model.to_tokens
+    def to_tokens(self, *args: Any, **kwargs: Any) -> Any:
+        return self.wrapped_model.to_tokens(*args, **kwargs)
 
-    def to_str_tokens(self) -> Any:
-        return self.wrapped_model.to_str_tokens
+    def to_str_tokens(self, *args: Any, **kwargs: Any) -> Any:
+        return self.wrapped_model.to_str_tokens(*args, **kwargs)
 
     def to_string(self, *args: Any, **kwargs: Any) -> Any:
         return self.wrapped_model.to_string(*args, **kwargs)

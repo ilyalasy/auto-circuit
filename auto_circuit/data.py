@@ -8,7 +8,8 @@ import torch.utils.data
 from attr import dataclass
 from torch.utils.data import DataLoader, Dataset, Subset
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCache
-
+from transformer_lens.HookedTransformer import HookedTransformer
+from transformer_lens.utils import get_attention_mask
 BatchKey = int
 """A unique key for a [`PromptPairBatch`][auto_circuit.data.PromptPairBatch]."""
 
@@ -19,16 +20,14 @@ class PromptPair:
     A pair of clean and corrupt prompts with correct and incorrect answers.
 
     Args:
-        clean: The 'clean' prompt. This is typically an example of the behavior we want
-            to isolate where the model performs well.
-        corrupt: The 'corrupt' prompt. This is typically similar to the 'clean' prompt,
-            but with some crucial difference that changes the model output.
+        clean: The 'clean' prompt, containing 'input_ids' and 'attention_mask'.
+        corrupt: The 'corrupt' prompt, containing 'input_ids' and 'attention_mask'.
         answers: The correct completions for the clean prompt.
         wrong_answers: The incorrect completions for the clean prompt.
     """
 
-    clean: t.Tensor
-    corrupt: t.Tensor
+    clean: Dict[str, t.Tensor]
+    corrupt: Dict[str, t.Tensor]
     answers: t.Tensor
     wrong_answers: t.Tensor
 
@@ -45,11 +44,8 @@ class PromptPairBatch:
             activations for the common prefix of the prompts. See
             [`load_datasets_from_json`][auto_circuit.data.load_datasets_from_json] for
             more information.
-        clean: The 'clean' prompts in a 2D tensor. These are typically examples of the
-            behavior we want to isolate where the model performs well.
-        corrupt: The 'corrupt' prompts in a 2D tensor. These are typically similar to
-            the 'clean' prompts, but with some crucial difference that changes the model
-            output.
+        clean: The 'clean' prompts in a dictionary with 'input_ids' and 'attention_mask'.
+        corrupt: The 'corrupt' prompts in a dictionary with 'input_ids' and 'attention_mask'.
         answers: The correct answers completions for the clean prompts.
             If all prompts have the same number of answers, this is a 2D tensor.
             If each prompt has a different number of answers, this is a list of 1D
@@ -67,35 +63,62 @@ class PromptPairBatch:
 
     key: BatchKey
     batch_diverge_idx: int
-    clean: t.Tensor
-    corrupt: t.Tensor
+    clean: Dict[str, t.Tensor]
+    corrupt: Dict[str, t.Tensor]
     answers: List[t.Tensor] | t.Tensor
     wrong_answers: List[t.Tensor] | t.Tensor
 
 
 def collate_fn(batch: List[PromptPair]) -> PromptPairBatch:
-    clean = t.stack([p.clean for p in batch])
-    corrupt = t.stack([p.corrupt for p in batch])
+    # Stack input_ids and attention_masks separately
+    clean_input_ids = t.stack([p.clean["input_ids"] for p in batch])
+    corrupt_input_ids = t.stack([p.corrupt["input_ids"] for p in batch])
+    
+    clean_attention_mask = None
+    corrupt_attention_mask = None
+    
+    if all("attention_mask" in p.clean for p in batch):
+        clean_attention_mask = t.stack([p.clean["attention_mask"] for p in batch])
+    
+    if all("attention_mask" in p.corrupt for p in batch):
+        corrupt_attention_mask = t.stack([p.corrupt["attention_mask"] for p in batch])
+    
+    # Handle answers and wrong_answers
     if all([p.answers.shape == batch[0].answers.shape for p in batch]):
         answers = t.stack([p.answers for p in batch])
     else:  # Sometimes each prompt has a different number of answers
         answers = [p.answers for p in batch]
+    
     if all([p.wrong_answers.shape == batch[0].wrong_answers.shape for p in batch]):
         wrong_answers = t.stack([p.wrong_answers for p in batch])
     else:  # Sometimes each prompt has a different number of wrong answers
         wrong_answers = [p.wrong_answers for p in batch]
-    key = hash((str(clean.tolist()), str(corrupt.tolist())))
 
-    diverge_idxs = (~(clean == corrupt)).int().argmax(dim=1)
+    # Create clean and corrupt dictionaries
+    clean = {"input": clean_input_ids} # TransformerLens argument is "input", instead of "input_ids"
+    corrupt = {"input": corrupt_input_ids}
+    
+    if clean_attention_mask is not None:
+        clean["attention_mask"] = clean_attention_mask
+        
+    if corrupt_attention_mask is not None:
+        corrupt["attention_mask"] = corrupt_attention_mask
+
+    # Generate hash key based on input_ids
+    key = hash((str(clean_input_ids.tolist()), str(corrupt_input_ids.tolist())))
+
+    # Find diverge index
+    diverge_idxs = (~(clean_input_ids == corrupt_input_ids)).int().argmax(dim=1)
     batch_dvrg_idx: int = int(diverge_idxs.min().item())
+    
     return PromptPairBatch(key, batch_dvrg_idx, clean, corrupt, answers, wrong_answers)
 
 
 class PromptDataset(Dataset):
     def __init__(
         self,
-        clean_prompts: List[t.Tensor] | t.Tensor,
-        corrupt_prompts: List[t.Tensor] | t.Tensor,
+        clean_prompts: List[Dict[str, t.Tensor]] | Dict[str, t.Tensor],
+        corrupt_prompts: List[Dict[str, t.Tensor]] | Dict[str, t.Tensor],
         answers: List[t.Tensor],
         wrong_answers: List[t.Tensor],
     ):
@@ -103,28 +126,42 @@ class PromptDataset(Dataset):
         A dataset of clean/corrupt prompt pairs with correct/incorrect answers.
 
         Args:
-            clean_prompts: The 'clean' prompts. These are typically examples of the
-                behavior we want to isolate where the model performs well.
-                If a list, each element is a 1D prompt tensor.
-                If a tensor, it should be 2D with shape (n_prompts, prompt_length).
-            corrupt_prompts: The 'corrupt' prompts. These are typically similar to the
-                'clean' prompts, but with some crucial difference that changes the model
-                output.
-                If a list, each element is a 1D prompt tensor.
-                If a tensor, it should be 2D with shape (n_prompts, prompt_length).
+            clean_prompts: The 'clean' prompts with 'input_ids' and 'attention_mask'.
+                If a list, each element is a dictionary with tensors.
+                If a dictionary, keys are 'input_ids' and 'attention_mask' with tensors
+                of shape (n_prompts, prompt_length).
+            corrupt_prompts: The 'corrupt' prompts with 'input_ids' and 'attention_mask'.
+                If a list, each element is a dictionary with tensors.
+                If a dictionary, keys are 'input_ids' and 'attention_mask' with tensors
+                of shape (n_prompts, prompt_length).
             answers: A list of correct answers.
                 Each element is a 1D tensor with the answer tokens.
             wrong_answers: A list of incorrect answers.
                 Each element is a 1D tensor with the wrong answer tokens.
         """
-
-        self.clean_prompts = clean_prompts
-        self.corrupt_prompts = corrupt_prompts
+        # Convert dictionary form to list form if necessary
+        if isinstance(clean_prompts, dict):
+            n_prompts = len(clean_prompts["input_ids"])
+            self.clean_prompts = [
+                {k: v[i] for k, v in clean_prompts.items()}
+                for i in range(n_prompts)
+            ]
+        else:
+            self.clean_prompts = clean_prompts
+            
+        if isinstance(corrupt_prompts, dict):
+            n_prompts = len(corrupt_prompts["input_ids"])
+            self.corrupt_prompts = [
+                {k: v[i] for k, v in corrupt_prompts.items()}
+                for i in range(n_prompts)
+            ]
+        else:
+            self.corrupt_prompts = corrupt_prompts
+            
         self.answers = answers
         self.wrong_answers = wrong_answers
 
     def __len__(self) -> int:
-        assert len(self.clean_prompts) == len(self.corrupt_prompts)
         return len(self.clean_prompts)
 
     def __getitem__(self, idx: int) -> PromptPair:
@@ -213,7 +250,7 @@ class PromptDataLoader(DataLoader[PromptPairBatch]):
 
 
 def load_datasets_from_json(
-    model: Optional[t.nn.Module],
+    model: Optional[HookedTransformer],
     path: Path | List[Path],
     device: t.device,
     prepend_bos: bool = True,
@@ -318,55 +355,76 @@ def load_datasets_from_json(
 
     kvs = []
     diverge_idx: int = 0
+
     if model is None:
-        clean_prompts = [t.tensor(p).to(device) for p in clean_prompts]
-        corrupt_prompts = [t.tensor(p).to(device) for p in corrupt_prompts]
+        # Create dictionaries for clean and corrupt prompts
+        clean_prompts = [
+            {"input_ids": t.tensor(p).to(device)} 
+            for p in clean_prompts
+        ]
+        corrupt_prompts = [
+            {"input_ids": t.tensor(p).to(device)} 
+            for p in corrupt_prompts
+        ]
         answers = [t.tensor(a).to(device) for a in answer_strs]
         wrong_answers = [t.tensor(a).to(device) for a in wrong_answer_strs]
-        seq_len = clean_prompts[0].shape[0]
+        seq_len = clean_prompts[0]["input_ids"].shape[0]
         assert not tail_divergence
     else:
-        tokenizer: Any = model.tokenizer
-        if prepend_bos:
-            clean_prompts = [tokenizer.bos_token + p for p in clean_prompts]
-            corrupt_prompts = [tokenizer.bos_token + p for p in corrupt_prompts]
-        tokenizer.padding_side = "left"
-        clean_prompts = tokenizer(clean_prompts, padding=pad, return_tensors="pt")
-        corrupt_prompts = tokenizer(corrupt_prompts, padding=pad, return_tensors="pt")
+        clean_tokens = model.to_tokens(clean_prompts, prepend_bos=True, padding_side='right', truncate=(model.cfg.n_ctx is not None))        
+        clean_attn_mask = get_attention_mask(model.tokenizer, clean_tokens, True)
+        corrupt_tokens = model.to_tokens(corrupt_prompts, prepend_bos=True, padding_side='right', truncate=(model.cfg.n_ctx is not None))
+        corrupt_attn_mask = get_attention_mask(model.tokenizer, corrupt_tokens, True)
+
         seq_len = None
         if return_seq_length:
-            assert t.all(clean_prompts["attention_mask"] == 1)
-            assert t.all(corrupt_prompts["attention_mask"] == 1)
-            seq_len = clean_prompts["input_ids"].shape[1]
-        ans_dicts: List[Dict] = [tokenizer(a, return_tensors="pt") for a in answer_strs]
-        wrong_ans_dicts: List[Dict] = [
-            tokenizer(a, return_tensors="pt") for a in wrong_answer_strs
-        ]
-        clean_prompts = clean_prompts["input_ids"].to(device)
-        corrupt_prompts = corrupt_prompts["input_ids"].to(device)
-        answers = [a["input_ids"].squeeze(0).to(device) for a in ans_dicts]
-        wrong_answers = [a["input_ids"].squeeze(0).to(device) for a in wrong_ans_dicts]
+            # We still want to check if the attention masks are all ones
+            assert t.all(clean_attn_mask == 1)
+            assert t.all(corrupt_attn_mask == 1)
+            seq_len = clean_tokens.shape[1]
+            
+        answers = [model.to_tokens(a,prepend_bos=False).squeeze(0) for a in answer_strs]
+        wrong_answers = [model.to_tokens(a,prepend_bos=False).squeeze(0) for a in wrong_answer_strs]
+        
+        # Create dictionaries for clean and corrupt prompts with input_ids and attention_mask
+        clean_prompts = {
+            "input_ids": clean_tokens,
+            "attention_mask": clean_attn_mask
+        }
+        
+        corrupt_prompts = {
+            "input_ids": corrupt_tokens,
+            "attention_mask": corrupt_attn_mask
+        }        
 
         if tail_divergence:
-            diverge_idxs = (~(clean_prompts == corrupt_prompts)).int().argmax(dim=1)
+            # Get divergence point based on input_ids
+            diverge_idxs = (~(clean_prompts["input_ids"] == corrupt_prompts["input_ids"])).int().argmax(dim=1)
             diverge_idx = int(diverge_idxs.min().item())
+            
         if diverge_idx > 0:
             seq_labels = seq_labels[diverge_idx:] if seq_labels is not None else None
             prefixs, cfg, device = [], model.cfg, model.cfg.device
             if isinstance(batch_size, tuple):
-                prefixs.append(clean_prompts[: (bs0 := batch_size[0]), :diverge_idx])
-                prefixs.append(clean_prompts[: (bs1 := batch_size[1]), :diverge_idx])
+                prefixs.append(clean_prompts["input_ids"][: (bs0 := batch_size[0]), :diverge_idx])
+                prefixs.append(clean_prompts["input_ids"][: (bs1 := batch_size[1]), :diverge_idx])
                 kvs.append(HookedTransformerKeyValueCache.init_cache(cfg, device, bs0))
                 kvs.append(HookedTransformerKeyValueCache.init_cache(cfg, device, bs1))
             else:
-                prefixs.append(clean_prompts[:batch_size, :diverge_idx])
+                prefixs.append(clean_prompts["input_ids"][:batch_size, :diverge_idx])
                 kvs.append(
                     HookedTransformerKeyValueCache.init_cache(cfg, device, batch_size)
                 )
 
-            for prefix, kv_cache in zip(prefixs, kvs):
+            for i, (prefix, kv_cache) in enumerate(zip(prefixs, kvs)):
                 with t.inference_mode():
-                    model(prefix, past_kv_cache=kv_cache)
+                    # Pass attention mask for the prefix
+                    if isinstance(batch_size, tuple):
+                        bs = batch_size[i]
+                    else:
+                        bs = batch_size
+                    prefix_attn_mask = clean_prompts["attention_mask"][:bs, :diverge_idx]
+                    model(prefix, attention_mask=prefix_attn_mask, past_kv_cache=kv_cache)
                 kv_cache.freeze()
 
             print("seq_len before divergence", seq_len)
@@ -376,10 +434,20 @@ def load_datasets_from_json(
             print("seq_len after divergence", seq_len)
 
             # This must be done AFTER gathering the kv caches
-            clean_prompts = clean_prompts[:, diverge_idx:]
-            corrupt_prompts = corrupt_prompts[:, diverge_idx:]
+            # For both clean and corrupt prompts, truncate the tensors to keep only after divergence
+            clean_prompts = {
+                "input_ids": clean_prompts["input_ids"][:, diverge_idx:],
+                "attention_mask": clean_prompts["attention_mask"][:, diverge_idx:]
+            }
+            
+            corrupt_prompts = {
+                "input_ids": corrupt_prompts["input_ids"][:, diverge_idx:],
+                "attention_mask": corrupt_prompts["attention_mask"][:, diverge_idx:]
+            }
 
-    dataset = PromptDataset(clean_prompts, corrupt_prompts, answers, wrong_answers)
+    dataset = PromptDataset(
+        clean_prompts, corrupt_prompts, answers, wrong_answers
+    )
     train_set = Subset(dataset, list(range(train_test_size[0])))
     test_set = Subset(dataset, list(range(train_test_size[0], n_train_and_test)))
     train_loader = PromptDataLoader(

@@ -83,7 +83,7 @@ def mask_gradient_prune_scores(
             for batch in dataloader:
                 patch_src_outs = src_outs[batch.key].clone().detach()
                 with patch_mode(model, patch_src_outs):
-                    logits = model(batch.clean)[out_slice]
+                    logits = model(**batch.clean)[out_slice]
                     if grad_function == "logit":
                         token_vals = logits
                     elif grad_function == "prob":

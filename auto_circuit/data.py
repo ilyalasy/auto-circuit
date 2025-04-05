@@ -371,9 +371,10 @@ def load_datasets_from_json(
         seq_len = clean_prompts[0]["input_ids"].shape[0]
         assert not tail_divergence
     else:
-        clean_tokens = model.to_tokens(clean_prompts, prepend_bos=True, padding_side='right', truncate=(model.cfg.n_ctx is not None))        
+        model.tokenizer.padding_side = "left"
+        clean_tokens = model.to_tokens(clean_prompts, prepend_bos=True, truncate=(model.cfg.n_ctx is not None))        
         clean_attn_mask = get_attention_mask(model.tokenizer, clean_tokens, True)
-        corrupt_tokens = model.to_tokens(corrupt_prompts, prepend_bos=True, padding_side='right', truncate=(model.cfg.n_ctx is not None))
+        corrupt_tokens = model.to_tokens(corrupt_prompts, prepend_bos=True, truncate=(model.cfg.n_ctx is not None))
         corrupt_attn_mask = get_attention_mask(model.tokenizer, corrupt_tokens, True)
 
         seq_len = None

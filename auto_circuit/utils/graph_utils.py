@@ -74,7 +74,9 @@ def patchable_model(
     wrappers, src_wrappers, dest_wrappers = make_model_patchable(
         model, factorized, srcs, nodes, device, seq_len, seq_dim
     )
-    if slice_output is None:
+    if isinstance(slice_output, tuple):
+        out_slice = slice_output
+    elif slice_output is None:
         out_slice: Tuple[slice | int, ...] = (slice(None),)
     else:
         last_slice = [-1] if slice_output == "last_seq" else [slice(1, None)]

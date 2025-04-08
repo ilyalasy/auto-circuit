@@ -104,9 +104,9 @@ def src_ablations(
             assert isinstance(sample, PromptDataLoader)
             for batch in sample:
                 if ablation_type.clean_dataset:
-                    model(batch.clean)
+                    model(**batch.clean)
                 if ablation_type.corrupt_dataset:
-                    model(batch.corrupt)
+                    model(**batch.corrupt)
             # PromptDataLoader has equal size batches, so we can take the mean of means
             mult = int(ablation_type.clean_dataset) + int(ablation_type.corrupt_dataset)
             assert mult == 2 or mult == 1
@@ -114,8 +114,8 @@ def src_ablations(
                 src_outs[src] = src_out / (len(sample) * mult)
         else:
             # Collect activations for a single batch
-            assert isinstance(sample, t.Tensor)
-            model(sample)
+            assert isinstance(sample, dict)
+            model(**sample)
 
     # Sort the src_outs dict by node idx
     src_outs = dict(sorted(src_outs.items(), key=lambda x: x[0].src_idx))

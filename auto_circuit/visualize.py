@@ -314,6 +314,6 @@ def draw_seq_graph(
     if display_ipython:
         fig.show()
     if file_path:
-        absolute_path: Path = repo_path_to_abs_path(file_path)
-        fig.write_image(str(absolute_path))
+        # absolute_path: Path = repo_path_to_abs_path(file_path)
+        fig.write_image(str(file_path))
     return fig

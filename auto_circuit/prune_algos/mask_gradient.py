@@ -75,23 +75,23 @@ def mask_gradient_prune_scores(
         )
 
     with train_mask_mode(model):
-        for batch in tqdm(dataloader, total=len(dataloader), desc="Calculating Prune Scores"):
-            if on_fly_patch:
-                if ablation_type == AblationType.ZERO:
-                    input_batch = batch.clean
-                else:
-                    input_batch = batch.clean if clean_corrupt == "clean" else batch.corrupt
-                patch_src_outs = src_ablations(model, input_batch, ablation_type)
+        for sample in range((integrated_grad_samples or 0) + 1):
+            # Interpolate the mask value if integrating gradients. Else set the value.
+            if integrated_grad_samples is not None:
+                set_all_masks(model, val=sample / integrated_grad_samples)
             else:
-                patch_src_outs = src_outs[batch.key].clone().detach()
+                assert mask_val is not None and integrated_grad_samples is None
+                set_all_masks(model, val=mask_val)
 
-            for sample in range((integrated_grad_samples or 0) + 1):                
-                # Interpolate the mask value if integrating gradients. Else set the value.
-                if integrated_grad_samples is not None:
-                    set_all_masks(model, val=sample / integrated_grad_samples)
+            for batch in tqdm(dataloader, total=len(dataloader), desc=f"Calculating Prune Scores for IG {sample}"):
+                if on_fly_patch:
+                    if ablation_type == AblationType.ZERO:
+                        input_batch = batch.clean
+                    else:
+                        input_batch = batch.clean if clean_corrupt == "clean" else batch.corrupt
+                    patch_src_outs = src_ablations(model, input_batch, ablation_type)
                 else:
-                    assert mask_val is not None and integrated_grad_samples is None
-                    set_all_masks(model, val=mask_val)
+                    patch_src_outs = src_outs[batch.key].clone().detach()
 
                 with patch_mode(model, patch_src_outs):
                     logits = model(**batch.clean)[out_slice]

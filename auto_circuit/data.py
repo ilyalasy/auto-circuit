@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCache
 from transformer_lens.HookedTransformer import HookedTransformer
 from transformer_lens.utils import get_attention_mask
-BatchKey = int
-"""A unique key for a [`PromptPairBatch`][auto_circuit.data.PromptPairBatch]."""
+from auto_circuit.types import AblationType, BatchKey
+
 
 
 @dataclass(frozen=True)
@@ -182,6 +182,7 @@ class PromptDataLoader(DataLoader[PromptPairBatch]):
         kv_cache: Optional[HookedTransformerKeyValueCache] = None,
         seq_labels: Optional[List[str]] = None,
         word_idxs: Dict[str, int] = {},
+        drop_last: bool = True,
         **kwargs: Any,
     ):
         """
@@ -215,7 +216,7 @@ class PromptDataLoader(DataLoader[PromptPairBatch]):
             single batch size.
         """
         super().__init__(
-            prompt_dataset, **kwargs, drop_last=True, collate_fn=collate_fn
+            prompt_dataset, **kwargs, drop_last=drop_last, collate_fn=collate_fn
         )
         self.seq_len = seq_len
         """
@@ -261,6 +262,7 @@ def load_datasets_from_json(
     shuffle: bool = True,
     random_seed: int = 42,
     pad: bool = True,
+    ablation_type: AblationType = AblationType.RESAMPLE,
 ) -> Tuple[PromptDataLoader, PromptDataLoader]:
     """
     Load a dataset from a json file. The file should specify a list of
@@ -446,6 +448,11 @@ def load_datasets_from_json(
                 "attention_mask": corrupt_prompts["attention_mask"][:, diverge_idx:]
             }
 
+    if ablation_type.mean_over_dataset:
+        drop_last = True
+    else:
+        drop_last = False
+
     dataset = PromptDataset(
         clean_prompts, corrupt_prompts, answers, wrong_answers
     )
@@ -460,6 +467,7 @@ def load_datasets_from_json(
         word_idxs=word_idxs,
         batch_size=batch_size[0] if isinstance(batch_size, tuple) else batch_size,
         shuffle=False,
+        drop_last=drop_last,
     )
     test_loader = PromptDataLoader(
         test_set,
@@ -470,5 +478,6 @@ def load_datasets_from_json(
         word_idxs=word_idxs,
         batch_size=batch_size[1] if isinstance(batch_size, tuple) else batch_size,
         shuffle=False,
+        drop_last=drop_last,
     )
     return train_loader, test_loader

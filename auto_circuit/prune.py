@@ -33,6 +33,7 @@ def run_circuits(
     render_graph: bool = False,
     render_score_threshold: bool = False,
     render_file_path: Optional[str] = None,
+    verbose: bool = True,
 ) -> CircuitOutputs:
     """Run the model, pruning edges based on the given `prune_scores`. Runs the model
     over the given `dataloader` for each `test_edge_count`.
@@ -62,8 +63,13 @@ def run_circuits(
     if ablation_type.mean_over_dataset:
         patch_src_outs = src_ablations(model, dataloader, ablation_type)
 
-    for batch_idx, batch in enumerate(batch_pbar := tqdm(dataloader)):
-        batch_pbar.set_description_str(f"Pruning Batch {batch_idx}", refresh=True)
+    if verbose:
+        batch_pbar = tqdm(dataloader)
+    else:
+        batch_pbar = dataloader
+    for batch_idx, batch in enumerate(batch_pbar):
+        if verbose:
+            batch_pbar.set_description_str(f"Pruning Batch {batch_idx}", refresh=True)
         if (patch_type == PatchType.TREE_PATCH and not reverse_clean_corrupt) or (
             patch_type == PatchType.EDGE_PATCH and reverse_clean_corrupt
         ):
@@ -81,8 +87,13 @@ def run_circuits(
 
         assert patch_src_outs is not None
         with patch_mode(model, patch_src_outs):
-            for edge_count in (edge_pbar := tqdm(test_edge_counts)):
-                edge_pbar.set_description_str(f"Running Circuit: {edge_count} Edges")
+            if verbose:
+                edge_pbar = tqdm(test_edge_counts)
+            else:
+                edge_pbar = test_edge_counts    
+            for edge_count in edge_pbar:
+                if verbose:
+                    edge_pbar.set_description_str(f"Running Circuit: {edge_count} Edges")
                 threshold = prune_scores_threshold(desc_ps, edge_count)
                 # When prune_scores are tied we can't prune exactly edge_count edges
                 patch_edge_count = 0

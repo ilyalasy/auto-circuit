@@ -9,6 +9,8 @@ import torch as t
 from auto_circuit.data import BatchKey
 from auto_circuit.utils.misc import module_by_name
 
+BatchKey = int
+"""A unique key for a [`PromptPairBatch`][auto_circuit.data.PromptPairBatch]."""
 
 class PatchWrapper(t.nn.Module, ABC):
     """Abstract class for a wrapper around a module that can be patched."""

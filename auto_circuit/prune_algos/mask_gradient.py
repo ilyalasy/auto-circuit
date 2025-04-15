@@ -1,9 +1,9 @@
-from typing import Dict, Literal, Optional, Set
+from typing import Callable, Dict, Literal, Optional, Set
 
 import torch as t
 from torch.nn.functional import log_softmax
 
-from auto_circuit.data import PromptDataLoader
+from auto_circuit.data import PromptDataLoader, PromptPairBatch
 from auto_circuit.types import AblationType, BatchKey, Edge, PruneScores
 from auto_circuit.utils.ablation_activations import batch_src_ablations, src_ablations
 from auto_circuit.utils.custom_tqdm import tqdm
@@ -21,7 +21,7 @@ def mask_gradient_prune_scores(
     dataloader: PromptDataLoader,
     official_edges: Optional[Set[Edge]],
     grad_function: Literal["logit", "prob", "logprob", "logit_exp"],
-    answer_function: Literal["avg_diff", "avg_val", "mse"],
+    answer_function: Callable[[t.Tensor, PromptPairBatch], t.Tensor] | Literal["avg_diff", "avg_val", "mse"],
     mask_val: Optional[float] = None,
     integrated_grad_samples: Optional[int] = None,
     ablation_type: AblationType = AblationType.RESAMPLE,
@@ -108,7 +108,9 @@ def mask_gradient_prune_scores(
                     else:
                         raise ValueError(f"Unknown grad_function: {grad_function}")
 
-                    if answer_function == "avg_diff":
+                    if callable(answer_function):
+                        loss = -answer_function(token_vals, batch)
+                    elif answer_function == "avg_diff":
                         loss = -batch_avg_answer_diff(token_vals, batch)
                     elif answer_function == "avg_val":
                         loss = -batch_avg_answer_val(token_vals, batch)
